@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use std::{io, thread};
+use std::{thread};
 
 use crate::RunArgs;
 

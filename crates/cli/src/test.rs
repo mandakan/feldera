@@ -2,13 +2,13 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Child;
+
 use std::time::Instant;
 use std::{fs, thread};
 
-use console::{style, Emoji};
+use console::{Emoji};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
-use log::error;
+
 use pipeline_types::schema::ProgramSchema;
 use reqwest::blocking::{Client, Response};
 use serde_json;
@@ -52,7 +52,7 @@ enum TestResult {
 
 fn execute_csv_test(
     test_dir: PathBuf,
-    args: TestArgs,
+    _args: TestArgs,
     schema: ProgramSchema,
     port: u16,
     pb: &ProgressBar,
