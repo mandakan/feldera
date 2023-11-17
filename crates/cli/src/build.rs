@@ -1,14 +1,16 @@
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use crate::assets::ASSETS;
+use crate::{CargoCmd, CheckArgs};
 use colored::Colorize;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use crate::{CheckArgs, CargoCmd};
-use crate::assets::ASSETS;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
-const COMPILER_JAR: &[u8] = include_bytes!("../../../sql-to-dbsp-compiler/SQL-compiler/target/sql2dbsp-jar-with-dependencies.jar");
+const COMPILER_JAR: &[u8] = include_bytes!(
+    "../../../sql-to-dbsp-compiler/SQL-compiler/target/sql2dbsp-jar-with-dependencies.jar"
+);
 
 fn ensure_compiler_jar_exists(build_dir: &Path) -> PathBuf {
     let jar_path = build_dir.join("compiler.jar");
@@ -19,10 +21,13 @@ fn ensure_compiler_jar_exists(build_dir: &Path) -> PathBuf {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let metadata = jar_path.metadata().expect("Can't get metadata for SQL compiler executable");
+            let metadata = jar_path
+                .metadata()
+                .expect("Can't get metadata for SQL compiler executable");
             let mut permissions = metadata.permissions();
             permissions.set_mode(0o755); // Read, write, and execute for owner; read and execute for others
-            fs::set_permissions(&jar_path, permissions).expect("Can't mark SQL compiler executable");
+            fs::set_permissions(&jar_path, permissions)
+                .expect("Can't mark SQL compiler executable");
         }
     }
 
@@ -42,7 +47,14 @@ pub(crate) fn build_command(args: &CheckArgs, build: CargoCmd) {
     let project_sql_path = args.path.as_str();
     let output_file_path = create_output_path(project_sql_path);
 
-    println!("{:>width$} {} ({} -> {})", "Generating".green().bold(), "Rust", project_sql_path, output_file_path, width=12);
+    println!(
+        "{:>width$} {} ({} -> {})",
+        "Generating".green().bold(),
+        "Rust",
+        project_sql_path,
+        output_file_path,
+        width = 12
+    );
 
     let build_dir = Path::new("build");
     std::fs::create_dir_all(build_dir).expect("can't create build/ dir");
@@ -61,22 +73,30 @@ pub(crate) fn build_command(args: &CheckArgs, build: CargoCmd) {
         .arg("--ignoreOrder")
         .arg(project_sql_path)
         .stdout(Stdio::piped())
-        .spawn().expect("Can't spawn sql compiler")
-        .wait_with_output().expect("Can't wait for SQL compiler output"); // Captures the output
+        .spawn()
+        .expect("Can't spawn sql compiler")
+        .wait_with_output()
+        .expect("Can't wait for SQL compiler output"); // Captures the output
 
     let duration = start.elapsed();
 
     if compiler_process.status.success() {
-        println!("{:>width$} SQL target(s) in {}.{}s.", "Finished".green().bold(), duration.as_secs(), duration.subsec_millis(), width=12);
+        println!(
+            "{:>width$} SQL target(s) in {}.{}s.",
+            "Finished".green().bold(),
+            duration.as_secs(),
+            duration.subsec_millis(),
+            width = 12
+        );
         let compiler_output = String::from_utf8_lossy(&compiler_process.stdout);
         if args.verbose > 0 {
             println!("{}", compiler_output);
         }
 
-
         // Ensure the directory structure exists
         if let Some(parent) = Path::new(&output_file_path).parent() {
-            fs::create_dir_all(parent).expect("Failed to create directory structure for output file");
+            fs::create_dir_all(parent)
+                .expect("Failed to create directory structure for output file");
         }
 
         let mut main_rs_content = compiler_output.to_string();
@@ -91,24 +111,35 @@ pub(crate) fn build_command(args: &CheckArgs, build: CargoCmd) {
                 .truncate(true)
                 .open(&output_file_path)
                 .expect("Failed to open compiler output file for writing");
-            file.write_all(main_rs_content.as_bytes()).expect("Failed to write compiler output to source file");
+            file.write_all(main_rs_content.as_bytes())
+                .expect("Failed to write compiler output to source file");
         }
 
-        fs::write(build_dir.join("pipeline").join("Cargo.toml"),&ASSETS.get("Cargo.toml").expect("Cargo.toml asset not found").as_bytes())
-            .expect("Failed to write compiler output to source file");
+        fs::write(
+            build_dir.join("pipeline").join("Cargo.toml"),
+            &ASSETS
+                .get("Cargo.toml")
+                .expect("Cargo.toml asset not found")
+                .as_bytes(),
+        )
+        .expect("Failed to write compiler output to source file");
 
         if args.cargo {
             let _cargo_process = Command::new("cargo")
                 .arg(build.as_str())
                 .arg("--manifest-path")
                 .arg(build_dir.join("pipeline").join("Cargo.toml"))
-                .spawn().expect("Can't spawn cargo check")
-                .wait_with_output().expect("Can't wait for cargo check output"); // Captures the output
+                .arg(if args.release { "--release" } else { "--" })
+                .spawn()
+                .expect("Can't spawn cargo check")
+                .wait_with_output()
+                .expect("Can't wait for cargo check output"); // Captures the output
         }
-
     } else {
         eprintln!("SQL check failed.");
-        eprintln!("Error:\n{}", String::from_utf8_lossy(&compiler_process.stderr));
+        eprintln!(
+            "Error:\n{}",
+            String::from_utf8_lossy(&compiler_process.stderr)
+        );
     }
-
 }

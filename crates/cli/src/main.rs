@@ -1,9 +1,10 @@
-use clap::{Parser, ArgAction, Subcommand, Args};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
-mod init;
-mod build;
 mod assets;
+mod build;
+mod init;
 mod run;
+mod test;
 
 /// CLI tool for Feldera developers.
 #[derive(Parser)]
@@ -21,6 +22,9 @@ pub(crate) struct CheckArgs {
     /// Also run `cargo check` after SQL generation.
     #[clap(long)]
     cargo: bool,
+    /// Check the release profile of the binary.
+    #[clap(long)]
+    release: bool,
     /// Verbose mode (-v, -vv, -vvv, etc.)
     #[clap(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -31,6 +35,9 @@ pub(crate) struct BuildArgs {
     /// Path to SQL file.
     #[clap(long, default_value = "src/project.sql")]
     path: String,
+    /// Build the release version of the binary.
+    #[clap(long)]
+    release: bool,
     /// Verbose mode (-v, -vv, -vvv, etc.)
     #[clap(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -42,6 +49,7 @@ impl Into<CheckArgs> for BuildArgs {
             path: self.path,
             cargo: true,
             verbose: self.verbose,
+            release: self.release,
         }
     }
 }
@@ -54,6 +62,12 @@ pub(crate) struct RunArgs {
     /// Path to config file.
     #[clap(long, default_value = "config.json")]
     config: String,
+    /// Build the release version of the binary.
+    #[clap(long)]
+    release: bool,
+    /// Override which port the binary should listen on.
+    #[clap(long)]
+    default_port: Option<u16>,
     /// Verbose mode (-v, -vv, -vvv, etc.)
     #[clap(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -64,6 +78,7 @@ impl Into<CheckArgs> for RunArgs {
         CheckArgs {
             path: self.path,
             cargo: false,
+            release: self.release,
             verbose: self.verbose,
         }
     }
@@ -83,6 +98,34 @@ impl CargoCmd {
     }
 }
 
+#[derive(Args, Clone)]
+pub(crate) struct TestArgs {
+    /// Path to SQL file.
+    #[clap(long, default_value = "src/project.sql")]
+    path: String,
+    /// Path to config file.
+    #[clap(long, default_value = "config.json")]
+    config: String,
+    /// Path of tests directory.
+    #[clap(long, default_value = "tests")]
+    tests: String,
+    /// Verbose mode (-v, -vv, -vvv, etc.)
+    #[clap(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+impl Into<RunArgs> for TestArgs {
+    fn into(self) -> RunArgs {
+        RunArgs {
+            path: self.path,
+            config: self.config,
+            verbose: self.verbose,
+            release: false,
+            default_port: None,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum SubCommand {
     /// Sets up a scaffolded git repository with initial SQL, config, and tests.
@@ -94,7 +137,7 @@ enum SubCommand {
     /// Starts a pipeline from the repo as a local process.
     Run(RunArgs),
     /// Runs unit tests against the pipeline.
-    Test,
+    Test(TestArgs),
     /// Benchmarking the pipeline.
     Bench,
     /// Syncs program to a Feldera Cloud instance.
@@ -108,11 +151,11 @@ fn main() {
         SubCommand::Init { name } => init::init_command(&name),
         SubCommand::Check(args) => build::build_command(&args, CargoCmd::Check),
         SubCommand::Build(args) => build::build_command(&args.into(), CargoCmd::Build),
-        SubCommand::Run(args) =>  {
+        SubCommand::Run(args) => {
             build::build_command(&args.clone().into(), CargoCmd::Check);
             run::run_command(&args)
-        },
-        SubCommand::Test => test_command(),
+        }
+        SubCommand::Test(args) => test::test_command(args),
         SubCommand::Bench => bench_command(),
         SubCommand::Sync => sync_command(),
     }

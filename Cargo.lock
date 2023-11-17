@@ -2372,7 +2372,7 @@ dependencies = [
  "petgraph",
  "pretty",
  "proptest",
- "proptest-derive",
+ "proptest-derive 0.3.0",
  "rkyv",
  "rust_decimal",
  "schemars",
@@ -2416,7 +2416,7 @@ dependencies = [
  "pprof",
  "priority-queue",
  "proptest",
- "proptest-derive",
+ "proptest-derive 0.3.0",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_xoshiro",
@@ -2476,7 +2476,7 @@ dependencies = [
  "pipeline_types",
  "prometheus",
  "proptest",
- "proptest-derive",
+ "proptest-derive 0.3.0",
  "psutil",
  "rand 0.8.5",
  "rdkafka",
@@ -2897,6 +2897,10 @@ dependencies = [
  "clap 4.4.8",
  "colored",
  "once_cell",
+ "pipeline_types",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4771,7 +4775,7 @@ dependencies = [
  "pipeline_types",
  "pretty_assertions",
  "proptest",
- "proptest-derive",
+ "proptest-derive 0.3.0",
  "rand 0.8.5",
  "refinery",
  "reqwest",
@@ -4797,6 +4801,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "proptest-derive 0.4.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5103,6 +5108,17 @@ dependencies = [
  "proc-macro2 0.4.30",
  "quote 0.6.13",
  "syn 0.15.44",
+]
+
+[[package]]
+name = "proptest-derive"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cf16337405ca084e9c78985114633b6827711d22b9e6ef6c6c0d665eb3f0b6e"
+dependencies = [
+ "proc-macro2 1.0.69",
+ "quote 1.0.33",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5548,10 +5564,12 @@ dependencies = [
  "system-configuration",
  "tokio",
  "tokio-native-tls",
+ "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "winreg",
 ]
@@ -7441,6 +7459,19 @@ name = "wasm-bindgen-shared"
 version = "0.2.88"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d046c5d029ba91a1ed14da14dca44b68bf2f124cfbaf741c54151fdb3e0750b"
+
+[[package]]
+name = "wasm-streams"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4609d447824375f43e1ffbc051b50ad8f4b3ae8219680c94452ea05eb240ac7"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
 
 [[package]]
 name = "wasmtime-jit-icache-coherence"

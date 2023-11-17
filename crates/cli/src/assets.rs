@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub(crate) static ASSETS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
     m.insert("project.sql", include_str!("../assets/project.sql"));
-    m.insert("PARTS.csv", include_str!("../assets/PARTS.csv"));
+    m.insert("PART.csv", include_str!("../assets/PART.csv"));
     m.insert("PRICE.csv", include_str!("../assets/PRICE.csv"));
     m.insert("VENDOR.csv", include_str!("../assets/VENDOR.csv"));
     m.insert("Cargo.toml", include_str!("../assets/Cargo.toml"));

@@ -1,9 +1,8 @@
+use crate::assets::ASSETS;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use crate::assets::ASSETS;
-
 
 pub(crate) fn init_command(name: &str) {
     // Create the project directory
@@ -41,7 +40,12 @@ pub(crate) fn init_command(name: &str) {
             return;
         }
     };
-    if let Err(e) = file.write_all(&ASSETS.get("config.json").expect("config.json asset not found").as_bytes()) {
+    if let Err(e) = file.write_all(
+        &ASSETS
+            .get("config.json")
+            .expect("config.json asset not found")
+            .as_bytes(),
+    ) {
         eprintln!("Failed to write to config.json: {}", e);
     }
 
@@ -57,7 +61,12 @@ pub(crate) fn init_command(name: &str) {
             return;
         }
     };
-    if let Err(e) = file.write_all(&ASSETS.get("project.sql").expect("project.sql asset not found").as_bytes()) {
+    if let Err(e) = file.write_all(
+        &ASSETS
+            .get("project.sql")
+            .expect("project.sql asset not found")
+            .as_bytes(),
+    ) {
         eprintln!("Failed to write to src/project.sql: {}", e);
     }
 
@@ -66,7 +75,7 @@ pub(crate) fn init_command(name: &str) {
         eprintln!("Failed to create tests directory: {}", e);
         return;
     }
-    for filename in ["PARTS.csv", "PRICE.csv", "VENDOR.csv"].iter() {
+    for filename in ["PART.csv", "PRICE.csv", "VENDOR.csv"].iter() {
         let filepath = format!("tests/{}", filename);
         let mut file = match File::create(&filepath) {
             Ok(file) => file,
@@ -75,7 +84,12 @@ pub(crate) fn init_command(name: &str) {
                 return;
             }
         };
-        if let Err(e) = file.write_all(&ASSETS.get(filename).expect("CSV asset not found").as_bytes()) {
+        if let Err(e) = file.write_all(
+            &ASSETS
+                .get(filename)
+                .expect("CSV asset not found")
+                .as_bytes(),
+        ) {
             eprintln!("Failed to write to {}: {}", filepath, e);
         }
     }
