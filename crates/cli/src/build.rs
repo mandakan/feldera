@@ -3,7 +3,7 @@ use crate::{CargoCmd, CheckArgs};
 use colored::Colorize;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
