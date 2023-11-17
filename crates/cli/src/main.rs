@@ -1,4 +1,6 @@
 use clap::{ArgAction, Args, Parser, Subcommand};
+use indicatif::MultiProgress;
+use indicatif_log_bridge::LogWrapper;
 
 mod assets;
 mod build;
@@ -146,6 +148,10 @@ enum SubCommand {
 
 fn main() {
     let opts = Opts::parse();
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
+    let multi = MultiProgress::new();
+    LogWrapper::new(multi.clone(), logger).try_init().unwrap();
 
     match opts.subcmd {
         SubCommand::Init { name } => init::init_command(&name),
@@ -155,7 +161,7 @@ fn main() {
             build::build_command(&args.clone().into(), CargoCmd::Check);
             run::run_command(&args)
         }
-        SubCommand::Test(args) => test::test_command(args),
+        SubCommand::Test(args) => test::test_command(args, multi),
         SubCommand::Bench => bench_command(),
         SubCommand::Sync => sync_command(),
     }
