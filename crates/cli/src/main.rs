@@ -167,10 +167,6 @@ fn main() {
     }
 }
 
-fn test_command() {
-    println!("Running tests...");
-}
-
 fn bench_command() {
     println!("Benchmarking...");
 }
