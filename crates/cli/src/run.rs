@@ -2,8 +2,8 @@ use reqwest::blocking::Client;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::Duration;
-use std::{thread};
 
 use crate::RunArgs;
 
@@ -43,15 +43,28 @@ fn send_start(port: u16) {
 pub(crate) fn run_command(args: &RunArgs) {
     let build_dir = Path::new("build");
     let port = args.default_port.unwrap_or(9999);
+    let mut cmd_args = vec![
+        String::from("run"),
+        String::from("--manifest-path"),
+        build_dir
+            .join("pipeline")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .to_string(),
+    ];
+    if args.release {
+        cmd_args.push(String::from("--release"));
+    }
+    cmd_args.append(&mut vec![
+        String::from("--"),
+        String::from("--config-file"),
+        args.config.clone(),
+        String::from("--default-port"),
+        port.to_string(),
+    ]);
+
     let _cargo_process = Command::new("cargo")
-        .arg("run")
-        .arg("--manifest-path")
-        .arg(build_dir.join("pipeline").join("Cargo.toml"))
-        .arg("--")
-        .arg("--config-file")
-        .arg(&args.config)
-        .arg("--default-port")
-        .arg(port.to_string())
+        .args(cmd_args)
         .spawn()
         .expect("Can't spawn cargo check")
         .wait_with_output()
@@ -64,15 +77,28 @@ pub(crate) fn run_command(args: &RunArgs) {
 pub(crate) fn run_in_background(args: &RunArgs) -> Child {
     let build_dir = Path::new("build");
     let port = args.default_port.unwrap_or(9999);
+    let mut cmd_args = vec![
+        String::from("run"),
+        String::from("--manifest-path"),
+        build_dir
+            .join("pipeline")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .to_string(),
+    ];
+    if args.release {
+        cmd_args.push(String::from("--release"));
+    }
+    cmd_args.append(&mut vec![
+        String::from("--"),
+        String::from("--config-file"),
+        args.config.clone(),
+        String::from("--default-port"),
+        port.to_string(),
+    ]);
+
     let mut child = Command::new("cargo")
-        .arg("run")
-        .arg("--manifest-path")
-        .arg(build_dir.join("pipeline").join("Cargo.toml"))
-        .arg("--")
-        .arg("--config-file")
-        .arg(&args.config)
-        .arg("--default-port")
-        .arg(port.to_string())
+        .args(cmd_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

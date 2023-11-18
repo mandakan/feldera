@@ -20,3 +20,4 @@ log = "0.4.20"
 console = { version = "0.15.7", features = [] }
 prettytable-rs = "0.10.0"
 similar = "2.3.0"
+rand = { version = "0.8.5", features = ["small_rng"] }

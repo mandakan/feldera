@@ -20,13 +20,13 @@ use crate::{RunArgs, TestArgs};
 
 static SPARKLE: Emoji<'_, '_> = Emoji("✨ ", "OK");
 
-fn parse_schema<P: AsRef<Path>>(path: P) -> Result<ProgramSchema, Box<dyn Error>> {
+pub(crate) fn parse_schema<P: AsRef<Path>>(path: P) -> Result<ProgramSchema, Box<dyn Error>> {
     let file_contents = fs::read_to_string(path)?;
     let schema: ProgramSchema = serde_json::from_str(&file_contents)?;
     Ok(schema)
 }
 
-fn post_csv_data(data: &str, relation: &str, port: u16) -> reqwest::Result<Response> {
+pub(crate) fn post_csv_data(data: &str, relation: &str, port: u16) -> reqwest::Result<Response> {
     let url = format!("http://localhost:{port}/ingress/{relation}?format=csv");
     Client::new()
         .post(&url)

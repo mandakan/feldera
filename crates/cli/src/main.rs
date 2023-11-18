@@ -3,6 +3,7 @@ use indicatif::MultiProgress;
 use indicatif_log_bridge::LogWrapper;
 
 mod assets;
+mod bench;
 mod build;
 mod init;
 mod run;
@@ -128,6 +129,34 @@ impl Into<RunArgs> for TestArgs {
     }
 }
 
+#[derive(Args, Clone)]
+pub(crate) struct BenchArgs {
+    /// Path to SQL file.
+    #[clap(long, default_value = "src/project.sql")]
+    path: String,
+    /// Path to config file.
+    #[clap(long, default_value = "config.json")]
+    config: String,
+    /// How long to send data (in seconds).
+    #[clap(long, default_value = "10")]
+    duration: u64,
+    /// Verbose mode (-v, -vv, -vvv, etc.)
+    #[clap(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+impl Into<RunArgs> for BenchArgs {
+    fn into(self) -> RunArgs {
+        RunArgs {
+            path: self.path,
+            config: self.config,
+            verbose: self.verbose,
+            release: true,
+            default_port: None,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum SubCommand {
     /// Sets up a scaffolded git repository with initial SQL, config, and tests.
@@ -141,9 +170,11 @@ enum SubCommand {
     /// Runs unit tests against the pipeline.
     Test(TestArgs),
     /// Benchmarking the pipeline.
-    Bench,
+    Bench(BenchArgs),
     /// Syncs program to a Feldera Cloud instance.
     Sync,
+    /// Interact with pipeline manager
+    Cloud,
 }
 
 fn main() {
@@ -162,16 +193,8 @@ fn main() {
             run::run_command(&args)
         }
         SubCommand::Test(args) => test::test_command(args, multi),
-        SubCommand::Bench => bench_command(),
-        SubCommand::Sync => sync_command(),
+        SubCommand::Bench(args) => bench::bench_command(args, multi),
+        SubCommand::Sync => unimplemented!("Sync command not implemented"),
+        SubCommand::Cloud => unimplemented!("Cloud command not implemented"),
     }
-}
-
-fn bench_command() {
-    println!("Benchmarking...");
-}
-
-fn sync_command() {
-    println!("Syncing to cloud...");
-    unimplemented!()
 }
