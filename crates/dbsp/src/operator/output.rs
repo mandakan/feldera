@@ -375,6 +375,8 @@ mod test {
 
     #[test]
     fn test_guarded_output_handle() {
+        panic!("bla");
+
         let (mut dbsp, (input, guard, output)) = Runtime::init_circuit(4, |circuit| {
             let (zset, zset_handle) = circuit.add_input_zset::<u64, isize>();
             let (guard, guard_handle) = circuit.add_input_stream::<bool>();

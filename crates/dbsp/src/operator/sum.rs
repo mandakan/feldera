@@ -140,6 +140,7 @@ mod test {
 
     #[test]
     fn zset_sum() {
+        panic!("bla");
         let build_circuit = |circuit: &RootCircuit| {
             let mut s = <OrdZSet<_, _> as HasZero>::zero();
             let source1 = circuit.add_source(Generator::new(move || {
