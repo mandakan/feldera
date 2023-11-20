@@ -49,15 +49,10 @@ pub(crate) fn init_command(name: &str) {
         eprintln!("Failed to write to config.json: {}", e);
     }
 
-    // Create src/ directory and project.sql file
-    if let Err(e) = fs::create_dir("src") {
-        eprintln!("Failed to create src directory: {}", e);
-        return;
-    }
-    let mut file = match File::create("src/project.sql") {
+    let mut file = match File::create("project.sql") {
         Ok(file) => file,
         Err(e) => {
-            eprintln!("Failed to create src/project.sql: {}", e);
+            eprintln!("Failed to create project.sql: {}", e);
             return;
         }
     };
@@ -67,7 +62,7 @@ pub(crate) fn init_command(name: &str) {
             .expect("project.sql asset not found")
             .as_bytes(),
     ) {
-        eprintln!("Failed to write to src/project.sql: {}", e);
+        eprintln!("Failed to write to project.sql: {}", e);
     }
 
     // Create tests/ directory and .csv files

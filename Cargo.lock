@@ -2919,7 +2919,7 @@ checksum = "25cbce373ec4653f1a01a31e8a5e5ec0c622dc27ff9c4e6606eefef5cbbed4a5"
 
 [[package]]
 name = "feldera"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap 4.4.8",
  "colored",
@@ -2929,7 +2929,6 @@ dependencies = [
  "indicatif-log-bridge",
  "log",
  "once_cell",
- "pipeline_types",
  "prettytable-rs",
  "rand 0.8.5",
  "reqwest",

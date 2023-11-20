@@ -1,8 +1,8 @@
 use crate::run::run_in_background;
 use crate::test::{parse_schema, post_csv_data};
+use crate::types::Relation;
 use crate::{BenchArgs, RunArgs};
 use indicatif::{HumanBytes, HumanCount, MultiProgress, ProgressBar, ProgressStyle};
-use pipeline_types::schema::Relation;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::prelude::SmallRng;
 use rand::{Rng, SeedableRng};

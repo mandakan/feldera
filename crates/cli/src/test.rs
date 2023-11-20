@@ -11,7 +11,6 @@ use std::{fs, thread};
 use console::{Emoji, Style};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 
-use pipeline_types::schema::ProgramSchema;
 use reqwest::blocking::{Client, Response};
 use serde_json;
 
@@ -41,6 +40,7 @@ enum TestResult {
     OutputError(String, String, String, String),
 }
 
+use crate::types::ProgramSchema;
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 

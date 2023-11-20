@@ -8,6 +8,7 @@ mod build;
 mod init;
 mod run;
 mod test;
+mod types;
 
 /// CLI tool for Feldera developers.
 #[derive(Parser)]
@@ -20,7 +21,7 @@ pub(crate) struct Opts {
 #[derive(Args)]
 pub(crate) struct CheckArgs {
     /// Path to SQL file.
-    #[clap(long, default_value = "src/project.sql")]
+    #[clap(long, default_value = "project.sql")]
     path: String,
     /// Also run `cargo check` after SQL generation.
     #[clap(long)]
@@ -36,7 +37,7 @@ pub(crate) struct CheckArgs {
 #[derive(Args)]
 pub(crate) struct BuildArgs {
     /// Path to SQL file.
-    #[clap(long, default_value = "src/project.sql")]
+    #[clap(long, default_value = "project.sql")]
     path: String,
     /// Build the release version of the binary.
     #[clap(long)]
@@ -60,7 +61,7 @@ impl Into<CheckArgs> for BuildArgs {
 #[derive(Args, Clone)]
 pub(crate) struct RunArgs {
     /// Path to SQL file.
-    #[clap(long, default_value = "src/project.sql")]
+    #[clap(long, default_value = "project.sql")]
     path: String,
     /// Path to config file.
     #[clap(long, default_value = "config.json")]
@@ -104,7 +105,7 @@ impl CargoCmd {
 #[derive(Args, Clone)]
 pub(crate) struct TestArgs {
     /// Path to SQL file.
-    #[clap(long, default_value = "src/project.sql")]
+    #[clap(long, default_value = "project.sql")]
     path: String,
     /// Path to config file.
     #[clap(long, default_value = "config.json")]
@@ -132,7 +133,7 @@ impl Into<RunArgs> for TestArgs {
 #[derive(Args, Clone)]
 pub(crate) struct BenchArgs {
     /// Path to SQL file.
-    #[clap(long, default_value = "src/project.sql")]
+    #[clap(long, default_value = "project.sql")]
     path: String,
     /// Path to config file.
     #[clap(long, default_value = "config.json")]
