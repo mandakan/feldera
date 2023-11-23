@@ -7,8 +7,8 @@ pub(crate) static ASSETS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(
     m.insert("PART.csv", include_str!("PART.csv"));
     m.insert("PRICE.csv", include_str!("PRICE.csv"));
     m.insert("VENDOR.csv", include_str!("VENDOR.csv"));
-    m.insert("Cargo.toml", include_str!("Cargo.toml"));
-    m.insert("main.rs", include_str!("main.rs"));
+    m.insert("Cargo.toml", include_str!("Cargo.toml.template"));
+    m.insert("main.rs", include_str!("main.rs.template"));
     m.insert("config.json", include_str!("config.json"));
     m
 });
