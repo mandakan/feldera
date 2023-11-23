@@ -158,6 +158,17 @@ impl Into<RunArgs> for BenchArgs {
     }
 }
 
+impl Into<CheckArgs> for BenchArgs {
+    fn into(self) -> CheckArgs {
+        CheckArgs {
+            path: self.path,
+            verbose: self.verbose,
+            release: true,
+            cargo: true,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum SubCommand {
     /// Sets up a scaffolded git repository with initial SQL, config, and tests.
@@ -194,7 +205,10 @@ fn main() {
             run::run_command(&args)
         }
         SubCommand::Test(args) => test::test_command(args, multi),
-        SubCommand::Bench(args) => bench::bench_command(args, multi),
+        SubCommand::Bench(args) => {
+            build::build_command(&args.clone().into(), CargoCmd::Build);
+            bench::bench_command(args, multi)
+        }
         SubCommand::Sync => unimplemented!("Sync command not implemented"),
         SubCommand::Cloud => unimplemented!("Cloud command not implemented"),
     }

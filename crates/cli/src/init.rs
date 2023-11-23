@@ -70,8 +70,13 @@ pub(crate) fn init_command(name: &str) {
         eprintln!("Failed to create tests directory: {}", e);
         return;
     }
+    if let Err(e) = fs::create_dir("tests/simple_csv") {
+        eprintln!("Failed to create simple_csv directory: {}", e);
+        return;
+    }
+
     for filename in ["PART.csv", "PRICE.csv", "VENDOR.csv"].iter() {
-        let filepath = format!("tests/{}", filename);
+        let filepath = format!("tests/simple_csv/{}", filename);
         let mut file = match File::create(&filepath) {
             Ok(file) => file,
             Err(e) => {

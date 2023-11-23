@@ -12,7 +12,13 @@ fn ensure_compiler_jar_exists(build_dir: &Path) -> PathBuf {
     let jar_path = build_dir.join("compiler.jar");
 
     if !jar_path.exists() {
-        fs::write(&jar_path, crate::assets::COMPILER_JAR).expect("Can't write compiler JAR");
+        reqwest::blocking::get("https://feldera-test-cli.s3.us-west-2.amazonaws.com/sql2dbsp-jar-with-dependencies.jar")
+            .expect("Can't download SQL compiler JAR")
+            .error_for_status()
+            .expect("Can't download SQL compiler JAR")
+            .copy_to(&mut fs::File::create(&jar_path).expect("Can't create compiler JAR file"))
+            .expect("Can't write compiler JAR");
+
         // Make the file executable (Unix-specific)
         #[cfg(unix)]
         {
@@ -32,7 +38,7 @@ fn ensure_compiler_jar_exists(build_dir: &Path) -> PathBuf {
 
 fn create_output_path(input_path: &str) -> String {
     let path = Path::new(input_path);
-    let mut output_path = Path::new("build/pipeline").join(path);
+    let mut output_path = Path::new("build/pipeline/src").join(path);
     output_path.set_file_name("main");
     output_path.set_extension("rs");
     output_path.to_string_lossy().into_owned()

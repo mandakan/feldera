@@ -12,5 +12,3 @@ pub(crate) static ASSETS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(
     m.insert("config.json", include_str!("config.json"));
     m
 });
-
-pub const COMPILER_JAR: &[u8] = include_bytes!("sql2dbsp-jar-with-dependencies.jar");
