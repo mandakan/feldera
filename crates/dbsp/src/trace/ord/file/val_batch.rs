@@ -5,12 +5,9 @@ use std::{
     marker::PhantomData,
 };
 
-use feldera_storage::{
-    backend::{StorageControl, StorageExecutor, StorageRead},
-    file::{
-        reader::{ColumnSpec, Cursor as FileCursor, Reader},
-        writer::{Parameters, Writer2},
-    },
+use feldera_storage::file::{
+    reader::{ColumnSpec, Cursor as FileCursor, Reader},
+    writer::{Parameters, Writer2},
 };
 use itertools::Itertools;
 use rand::{seq::index::sample, Rng};
@@ -271,12 +268,11 @@ fn include<K>(x: &K, filter: &Option<Filter<K>>) -> bool {
     }
 }
 
-fn read_filtered<S, K, A, N, T>(
-    cursor: &mut FileCursor<S, K, A, N, T>,
+fn read_filtered<K, A, N, T>(
+    cursor: &mut FileCursor<StorageBackend, K, A, N, T>,
     filter: &Option<Filter<K>>,
 ) -> Option<K>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     T: ColumnSpec,
