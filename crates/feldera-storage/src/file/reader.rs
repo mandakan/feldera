@@ -6,17 +6,16 @@ use std::{
     cmp::Ordering::{self, *},
     fmt::{Debug, Formatter, Result as FmtResult},
     marker::PhantomData,
+    mem::size_of,
     ops::{Bound, Range, RangeBounds},
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
 };
 
 use binrw::{
     io::{self, Error as IoError},
     BinRead, Error as BinError,
 };
-use crc32c::crc32c;
 use rkyv::{archived_value, Deserialize, Infallible};
 use thiserror::Error as ThisError;
 
@@ -25,14 +24,14 @@ use crate::{
         ImmutableFileHandle, StorageControl, StorageError, StorageExecutor, StorageRead,
         StorageWrite,
     },
-    buffer_cache::FBuf,
+    buffer_cache::{BufferCache, FBuf},
     file::format::{
-        ArchivedItem, DataBlockHeader, FileTrailer, FileTrailerColumn, IndexBlockHeader, Item,
-        NodeType, Varint, VERSION_NUMBER,
+        ArchivedItem, DataBlockHeader, FileTrailerColumn, IndexBlockHeader, Item, NodeType, Varint,
+        VERSION_NUMBER,
     },
 };
 
-use super::{BlockLocation, InvalidBlockLocation, Rkyv};
+use super::{cache::FileCacheEntry, BlockLocation, InvalidBlockLocation, Rkyv};
 
 /// Any kind of error encountered reading a layer file.
 #[derive(ThisError, Debug)]
@@ -252,6 +251,15 @@ pub enum CorruptionError {
         /// Row number of end of range (exclusive).
         end: u64,
     },
+
+    /// Bad block type.
+    #[error("{size}-byte block at offset {offset} is wrong type of block.")]
+    BadBlockType {
+        /// Block offset in bytes.
+        offset: u64,
+        /// Block size in bytes.
+        size: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -374,52 +382,22 @@ impl ValueMapReader {
     }
 }
 
-struct DataBlock<K, A> {
+/// Cached data block details.
+pub struct InnerDataBlock {
     location: BlockLocation,
-    raw: Arc<FBuf>,
+    raw: Rc<FBuf>,
     value_map: ValueMapReader,
     row_groups: Option<VarintReader>,
-    first_row: u64,
-    _phantom: PhantomData<(K, A)>,
 }
 
-impl<K, A> Clone for DataBlock<K, A> {
-    fn clone(&self) -> Self {
-        Self {
-            location: self.location,
-            raw: self.raw.clone(),
-            value_map: self.value_map.clone(),
-            row_groups: self.row_groups.clone(),
-            first_row: self.first_row,
-            _phantom: PhantomData,
-        }
+impl InnerDataBlock {
+    pub(super) fn cost(&self) -> usize {
+        size_of::<Self>() + self.raw.len()
     }
-}
-
-impl<K, A> DataBlock<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
-{
-    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageControl + StorageExecutor,
-    {
-        let raw = read_block(file, node.location)?;
+    pub(super) fn from_raw(raw: Rc<FBuf>, location: BlockLocation) -> Result<Self, Error> {
         let header = DataBlockHeader::read_le(&mut io::Cursor::new(raw.as_slice()))?;
-        let expected_rows = node.rows.end - node.rows.start;
-        if header.n_values as u64 != expected_rows {
-            let BlockLocation { size, offset } = node.location;
-            return Err(CorruptionError::DataBlockWrongNumberOfRows {
-                offset,
-                size,
-                n_rows: header.n_values as u64,
-                expected_rows,
-            }
-            .into());
-        }
         Ok(Self {
-            location: node.location,
+            location,
             value_map: ValueMapReader::new(
                 &raw,
                 header.value_map_varint,
@@ -433,19 +411,24 @@ where
                 header.n_values as usize + 1,
             )?,
             raw,
-            first_row: node.rows.start,
-            _phantom: PhantomData,
         })
+    }
+
+    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Rc<Self>, Error>
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    {
+        file.cache.block_on(file.cache.read_data_block(
+            file.file_handle.as_ref().unwrap(),
+            node.location.offset,
+            node.location.size,
+        ))
     }
     fn n_values(&self) -> usize {
         self.value_map.len()
     }
-    fn rows(&self) -> Range<u64> {
-        self.first_row..(self.first_row + self.n_values() as u64)
-    }
-    fn row_group(&self, row: u64) -> Result<Range<u64>, Error> {
+    fn row_group(&self, index: usize) -> Result<Range<u64>, Error> {
         let row_groups = self.row_groups.as_ref().unwrap();
-        let index = (row - self.first_row) as usize;
         let start = row_groups.get(&self.raw, index);
         let end = row_groups.get(&self.raw, index + 1);
         if start < end {
@@ -461,8 +444,67 @@ where
             .into())
         }
     }
+}
+
+struct DataBlock<K, A> {
+    inner: Rc<InnerDataBlock>,
+    first_row: u64,
+    _phantom: PhantomData<(K, A)>,
+}
+
+impl<K, A> Clone for DataBlock<K, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            first_row: self.first_row,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<K, A> DataBlock<K, A>
+where
+    K: Rkyv,
+    A: Rkyv,
+{
+    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    {
+        let inner = InnerDataBlock::new(file, node)?;
+
+        let expected_rows = node.rows.end - node.rows.start;
+        if inner.n_values() as u64 != expected_rows {
+            let BlockLocation { size, offset } = node.location;
+            return Err(CorruptionError::DataBlockWrongNumberOfRows {
+                offset,
+                size,
+                n_rows: inner.n_values() as u64,
+                expected_rows,
+            }
+            .into());
+        }
+
+        Ok(Self {
+            inner,
+            first_row: node.rows.start,
+            _phantom: PhantomData,
+        })
+    }
+    fn n_values(&self) -> usize {
+        self.inner.n_values()
+    }
+    fn rows(&self) -> Range<u64> {
+        self.first_row..(self.first_row + self.n_values() as u64)
+    }
+    fn row_group(&self, row: u64) -> Result<Range<u64>, Error> {
+        self.inner.row_group((row - self.first_row) as usize)
+    }
     unsafe fn archived_item(&self, index: usize) -> &ArchivedItem<K, A> {
-        archived_value::<Item<K, A>>(&self.raw, self.value_map.get(&self.raw, index))
+        archived_value::<Item<K, A>>(
+            &self.inner.raw,
+            self.inner.value_map.get(&self.inner.raw, index),
+        )
     }
     unsafe fn item(&self, index: usize) -> (K, A) {
         let item = self.archived_item(index);
@@ -552,7 +594,7 @@ struct TreeNode {
 impl TreeNode {
     fn read<S, K, A>(self, file: &ImmutableFileRef<S>) -> Result<TreeBlock<K, A>, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv + Debug,
         A: Rkyv,
     {
@@ -590,59 +632,28 @@ where
     }
 }
 
-struct IndexBlock<K> {
+/// Cached index block details.
+pub struct InnerIndexBlock {
     location: BlockLocation,
-    raw: Arc<FBuf>,
+    raw: Rc<FBuf>,
     child_type: NodeType,
     bounds: VarintReader,
     row_totals: VarintReader,
     child_pointers: VarintReader,
-    depth: usize,
-    first_row: u64,
-    _phantom: PhantomData<K>,
 }
 
-impl<K> Clone for IndexBlock<K> {
-    fn clone(&self) -> Self {
-        Self {
-            location: self.location,
-            raw: self.raw.clone(),
-            child_type: self.child_type,
-            bounds: self.bounds.clone(),
-            row_totals: self.row_totals.clone(),
-            child_pointers: self.child_pointers.clone(),
-            depth: self.depth,
-            first_row: self.first_row,
-            _phantom: PhantomData,
-        }
+impl InnerIndexBlock {
+    pub(super) fn cost(&self) -> usize {
+        size_of::<Self>() + self.raw.len()
     }
-}
-
-impl<K> IndexBlock<K>
-where
-    K: Rkyv,
-{
-    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageControl + StorageExecutor,
-    {
-        const MAX_DEPTH: usize = 64;
-        if node.depth > MAX_DEPTH {
-            // A depth of 64 (very deep) with a branching factor of 2 (very
-            // small) would allow for over `2**64` items.  A deeper file is a
-            // bug or a memory exhaustion attack.
-            return Err(CorruptionError::TooDeep {
-                depth: node.depth,
-                max_depth: MAX_DEPTH,
+    pub(super) fn from_raw(raw: Rc<FBuf>, location: BlockLocation) -> Result<Self, Error> {
+        let header = IndexBlockHeader::read_le(&mut io::Cursor::new(raw.as_slice()))?;
+        if header.n_children == 0 {
+            return Err(CorruptionError::EmptyIndex {
+                size: location.size,
+                offset: location.offset,
             }
             .into());
-        }
-
-        let raw = read_block(file, node.location)?;
-        let header = IndexBlockHeader::read_le(&mut io::Cursor::new(raw.as_slice()))?;
-        let BlockLocation { size, offset } = node.location;
-        if header.n_children == 0 {
-            return Err(CorruptionError::EmptyIndex { size, offset }.into());
         }
 
         let row_totals = VarintReader::new(
@@ -656,8 +667,8 @@ where
             let next = row_totals.get(&raw, i);
             if prev >= next {
                 return Err(CorruptionError::NonmonotonicIndex {
-                    size,
-                    offset,
+                    size: location.size,
+                    offset: location.offset,
                     prev,
                     next,
                 }
@@ -665,20 +676,8 @@ where
             }
         }
 
-        let expected_rows = node.rows.end - node.rows.start;
-        let n_rows = row_totals.get(&raw, header.n_children as usize - 1);
-        if n_rows != expected_rows {
-            return Err(CorruptionError::IndexBlockWrongNumberOfRows {
-                offset,
-                size,
-                n_rows,
-                expected_rows,
-            }
-            .into());
-        }
-
         Ok(Self {
-            location: node.location,
+            location,
             child_type: header.child_type,
             bounds: VarintReader::new(
                 &raw,
@@ -694,20 +693,90 @@ where
                 header.n_children as usize,
             )?,
             raw,
-            depth: node.depth,
+        })
+    }
+
+    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Rc<Self>, Error>
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    {
+        file.cache.block_on(file.cache.read_index_block(
+            file.file_handle.as_ref().unwrap(),
+            node.location.offset,
+            node.location.size,
+        ))
+    }
+}
+
+struct IndexBlock<K> {
+    inner: Rc<InnerIndexBlock>,
+    first_row: u64,
+    depth: usize,
+    _phantom: PhantomData<K>,
+}
+
+impl<K> Clone for IndexBlock<K> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            first_row: self.first_row,
+            depth: self.depth,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<K> IndexBlock<K>
+where
+    K: Rkyv,
+{
+    fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    {
+        const MAX_DEPTH: usize = 64;
+        if node.depth > MAX_DEPTH {
+            // A depth of 64 (very deep) with a branching factor of 2 (very
+            // small) would allow for over `2**64` items.  A deeper file is a
+            // bug or a memory exhaustion attack.
+            return Err(CorruptionError::TooDeep {
+                depth: node.depth,
+                max_depth: MAX_DEPTH,
+            }
+            .into());
+        }
+
+        let inner = InnerIndexBlock::new(file, node)?;
+
+        let expected_rows = node.rows.end - node.rows.start;
+        let n_rows = inner.row_totals.get(&inner.raw, inner.row_totals.count - 1);
+        if n_rows != expected_rows {
+            return Err(CorruptionError::IndexBlockWrongNumberOfRows {
+                offset: node.location.offset,
+                size: node.location.size,
+                n_rows,
+                expected_rows,
+            }
+            .into());
+        }
+
+        Ok(Self {
+            inner,
             first_row: node.rows.start,
+            depth: node.depth,
             _phantom: PhantomData,
         })
     }
 
     fn get_child_location(&self, index: usize) -> Result<BlockLocation, Error> {
-        self.child_pointers
-            .get(&self.raw, index)
+        self.inner
+            .child_pointers
+            .get(&self.inner.raw, index)
             .try_into()
             .map_err(|error: InvalidBlockLocation| {
                 Error::Corruption(CorruptionError::InvalidChildPointer {
-                    index_offset: self.location.offset,
-                    index_size: self.location.size,
+                    index_offset: self.inner.location.offset,
+                    index_size: self.inner.location.size,
                     index,
                     child_offset: error.offset,
                     child_size: error.size,
@@ -718,7 +787,7 @@ where
     fn get_child(&self, index: usize) -> Result<TreeNode, Error> {
         Ok(TreeNode {
             location: self.get_child_location(index)?,
-            node_type: self.child_type,
+            node_type: self.inner.child_type,
             depth: self.depth + 1,
             rows: self.get_rows(index),
         })
@@ -734,9 +803,9 @@ where
         let low = if index == 0 {
             0
         } else {
-            self.row_totals.get(&self.raw, index - 1)
+            self.inner.row_totals.get(&self.inner.raw, index - 1)
         };
-        let high = self.row_totals.get(&self.raw, index);
+        let high = self.inner.row_totals.get(&self.inner.raw, index);
         (self.first_row + low)..(self.first_row + high)
     }
 
@@ -744,9 +813,9 @@ where
         if index == 0 {
             0
         } else if index % 2 == 1 {
-            self.row_totals.get(&self.raw, index / 2) - 1
+            self.inner.row_totals.get(&self.inner.raw, index / 2) - 1
         } else {
-            self.row_totals.get(&self.raw, index / 2 - 1)
+            self.inner.row_totals.get(&self.inner.raw, index / 2 - 1)
         }
     }
 
@@ -767,8 +836,8 @@ where
     }
 
     unsafe fn get_bound(&self, index: usize) -> K {
-        let offset = self.bounds.get(&self.raw, index) as usize;
-        let archived = archived_value::<K>(&self.raw, offset);
+        let offset = self.inner.bounds.get(&self.inner.raw, index) as usize;
+        let archived = archived_value::<K>(&self.inner.raw, offset);
         archived.deserialize(&mut Infallible).unwrap()
     }
 
@@ -811,7 +880,7 @@ where
     }
 
     fn n_children(&self) -> usize {
-        self.child_pointers.count
+        self.inner.child_pointers.count
     }
 }
 
@@ -823,7 +892,7 @@ where
         write!(
             f,
             "IndexBlock {{ depth: {}, first_row: {}, child_type: {:?}, children = {{",
-            self.depth, self.first_row, self.child_type
+            self.depth, self.first_row, self.inner.child_type
         )?;
         for i in 0..self.n_children() {
             if i > 0 {
@@ -888,20 +957,24 @@ impl Column {
 /// dropped.
 pub(crate) struct ImmutableFileRef<S>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
-    storage: Rc<S>,
     path: PathBuf,
+    cache: Rc<BufferCache<S, FileCacheEntry>>,
     file_handle: Option<ImmutableFileHandle>,
 }
 
 impl<S> ImmutableFileRef<S>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
-    pub(crate) fn new(storage: &Rc<S>, file_handle: ImmutableFileHandle, path: PathBuf) -> Self {
+    pub(crate) fn new(
+        cache: &Rc<BufferCache<S, FileCacheEntry>>,
+        file_handle: ImmutableFileHandle,
+        path: PathBuf,
+    ) -> Self {
         Self {
-            storage: Rc::clone(storage),
+            cache: Rc::clone(cache),
             path,
             file_handle: Some(file_handle),
         }
@@ -910,18 +983,18 @@ where
 
 impl<S> Drop for ImmutableFileRef<S>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
         let _ = self
-            .storage
-            .block_on(self.storage.delete(self.file_handle.take().unwrap()));
+            .cache
+            .block_on(self.cache.delete(self.file_handle.take().unwrap()));
     }
 }
 
 struct ReaderInner<S, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     file: Rc<ImmutableFileRef<S>>,
     columns: Vec<Column>,
@@ -929,30 +1002,6 @@ where
     /// `fn() -> T` is `Send` and `Sync` regardless of `T`.  See
     /// <https://doc.rust-lang.org/nomicon/phantom-data.html>.
     _phantom: PhantomData<fn() -> T>,
-}
-
-fn read_block<S>(file: &ImmutableFileRef<S>, location: BlockLocation) -> Result<Arc<FBuf>, Error>
-where
-    S: StorageRead + StorageControl + StorageExecutor,
-{
-    let block = file.storage.block_on(file.storage.read_block(
-        file.file_handle.as_ref().unwrap(),
-        location.offset,
-        location.size,
-    ))?;
-    let computed_checksum = crc32c(&block[4..]);
-    let checksum = u32::from_le_bytes(block[..4].try_into().unwrap());
-    if checksum != computed_checksum {
-        let BlockLocation { size, offset } = location;
-        return Err(CorruptionError::InvalidChecksum {
-            size,
-            offset,
-            checksum,
-            computed_checksum,
-        }
-        .into());
-    }
-    Ok(block)
 }
 
 /// Layer file column specification.
@@ -994,25 +1043,26 @@ where
 ///
 /// `T` in `Reader<S, T>` must be a [`ColumnSpec`] that specifies the key and
 /// auxiliary data types for all of the columns in the file to be read.
-pub struct Reader<S, T>(Arc<ReaderInner<S, T>>)
+pub struct Reader<S, T>(Rc<ReaderInner<S, T>>)
 where
-    S: StorageControl + StorageExecutor;
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor;
 
 impl<S, T> Reader<S, T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     T: ColumnSpec,
 {
     /// Creates and returns a new `Reader` for `file`.
     pub(crate) fn new(file: Rc<ImmutableFileRef<S>>) -> Result<Self, Error> {
         let file_size = file
-            .storage
-            .block_on(file.storage.get_size(file.file_handle.as_ref().unwrap()))?;
+            .cache
+            .block_on(file.cache.get_size(file.file_handle.as_ref().unwrap()))?;
 
-        let file_trailer_block =
-            read_block(&file, BlockLocation::new(file_size - 4096, 4096).unwrap())?;
-        let file_trailer =
-            FileTrailer::read_le(&mut io::Cursor::new(file_trailer_block.as_slice()))?;
+        let file_trailer = file.cache.block_on(file.cache.read_file_trailer_block(
+            file.file_handle.as_ref().unwrap(),
+            file_size - 4096,
+            4096,
+        ))?;
         if file_trailer.version != VERSION_NUMBER {
             return Err(CorruptionError::InvalidVersion {
                 version: file_trailer.version,
@@ -1048,7 +1098,7 @@ where
             }
         }
 
-        Ok(Self(Arc::new(ReaderInner {
+        Ok(Self(Rc::new(ReaderInner {
             file,
             columns,
             _phantom: PhantomData,
@@ -1059,14 +1109,14 @@ where
     ///
     /// This internally creates an empty temporary file, which means that it can
     /// fail with an I/O error.
-    pub fn empty(storage: &Rc<S>) -> Result<Self, Error>
+    pub fn empty(cache: &Rc<BufferCache<S, FileCacheEntry>>) -> Result<Self, Error>
     where
-        S: StorageControl + StorageWrite + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
-        let file_handle = storage.block_on(storage.create())?;
-        let (file_handle, path) = storage.block_on(storage.complete(file_handle))?;
-        Ok(Self(Arc::new(ReaderInner {
-            file: Rc::new(ImmutableFileRef::new(storage, file_handle, path)),
+        let file_handle = cache.block_on(cache.create())?;
+        let (file_handle, path) = cache.block_on(cache.complete(file_handle))?;
+        Ok(Self(Rc::new(ReaderInner {
+            file: Rc::new(ImmutableFileRef::new(cache, file_handle, path)),
             columns: (0..T::n_columns()).map(|_| Column::empty()).collect(),
             _phantom: PhantomData,
         })))
@@ -1098,7 +1148,7 @@ where
 
 impl<S, T> Clone for Reader<S, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -1107,7 +1157,7 @@ where
 
 impl<S, K, A, N> Reader<S, (K, A, N)>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     (K, A, N): ColumnSpec,
@@ -1130,7 +1180,7 @@ where
 /// the desired column.
 pub struct RowGroup<'a, S, K, A, N, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv,
     A: Rkyv,
     T: ColumnSpec,
@@ -1143,7 +1193,7 @@ where
 
 impl<'a, S, K, A, N, T> Clone for RowGroup<'a, S, K, A, N, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv,
     A: Rkyv,
     T: ColumnSpec,
@@ -1160,7 +1210,7 @@ where
 
 impl<'a, S, K, A, N, T> Debug for RowGroup<'a, S, K, A, N, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv,
     A: Rkyv,
     T: ColumnSpec,
@@ -1172,7 +1222,7 @@ where
 
 impl<'a, S, K, A, N, T> RowGroup<'a, S, K, A, N, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     T: ColumnSpec,
@@ -1295,7 +1345,7 @@ pub trait FallibleEq {
 
 impl<S, K, A, N> FallibleEq for Reader<S, (K, A, N)>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     (K, A, N): ColumnSpec,
@@ -1308,7 +1358,7 @@ where
 
 impl<'a, S, K, A, T> FallibleEq for RowGroup<'a, S, K, A, (), T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug + Eq,
     A: Rkyv + Eq,
     T: ColumnSpec,
@@ -1332,7 +1382,7 @@ where
 
 impl<'a, S, K, A, NK, NA, NN, T> FallibleEq for RowGroup<'a, S, K, A, (NK, NA, NN), T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Eq + Debug,
     A: Rkyv + Eq,
     NK: Rkyv + Eq + Debug,
@@ -1367,7 +1417,7 @@ where
 /// cursor can only be before or after the row group.)
 pub struct Cursor<'a, S, K, A, N, T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv,
     A: Rkyv,
     T: ColumnSpec,
@@ -1378,7 +1428,7 @@ where
 
 impl<'a, S, K, A, N, T> Clone for Cursor<'a, S, K, A, N, T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Clone,
     A: Rkyv + Clone,
     T: ColumnSpec,
@@ -1393,7 +1443,7 @@ where
 
 impl<'a, S, K, A, N, T> Debug for Cursor<'a, S, K, A, N, T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv + Debug,
     T: ColumnSpec,
@@ -1405,7 +1455,7 @@ where
 
 impl<'a, S, K, A, N, T> Cursor<'a, S, K, A, N, T>
 where
-    S: StorageRead + StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     T: ColumnSpec,
@@ -1636,7 +1686,7 @@ where
 
 impl<'a, S, K, A, NK, NA, NN, T> Cursor<'a, S, K, A, (NK, NA, NN), T>
 where
-    S: StorageControl + StorageExecutor,
+    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K: Rkyv + Debug,
     A: Rkyv,
     NK: Rkyv + Debug,
@@ -1699,7 +1749,7 @@ where
 {
     fn for_row<S, N, T>(row_group: &RowGroup<'_, S, K, A, N, T>, row: u64) -> Result<Self, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
     {
         Self::for_row_from_ancestor(
@@ -1719,7 +1769,7 @@ where
         row: u64,
     ) -> Result<Self, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         loop {
             let block = node.read(&reader.0.file)?;
@@ -1733,7 +1783,7 @@ where
     }
     fn for_row_from_hint<S, T>(reader: &Reader<S, T>, hint: &Self, row: u64) -> Result<Self, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         if hint.data.rows().contains(&row) {
             return Ok(Self {
@@ -1767,7 +1817,7 @@ where
     }
     fn move_to_row<S, T>(&mut self, reader: &Reader<S, T>, row: u64) -> Result<(), Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         if self.data.rows().contains(&row) {
             self.row = row;
@@ -1782,7 +1832,7 @@ where
         bias: Ordering,
     ) -> Result<Option<Self>, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
         C: Fn(&K) -> Ordering,
     {
@@ -1923,14 +1973,15 @@ where
 {
     fn for_row<S, N, T>(row_group: &RowGroup<'_, S, K, A, N, T>, row: u64) -> Result<Self, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+
         T: ColumnSpec,
     {
         Ok(Self::Row(Path::for_row(row_group, row)?))
     }
     fn next<S, N, T>(&mut self, row_group: &RowGroup<'_, S, K, A, N, T>) -> Result<(), Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
     {
         let row = match self {
@@ -1947,7 +1998,7 @@ where
     }
     fn prev<S, N, T>(&mut self, row_group: &RowGroup<'_, S, K, A, N, T>) -> Result<(), Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
     {
         match self {
@@ -1975,7 +2026,8 @@ where
         row: u64,
     ) -> Result<(), Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+
         T: ColumnSpec,
     {
         if !row_group.rows.is_empty() {
@@ -2019,7 +2071,8 @@ where
         bias: Ordering,
     ) -> Result<Self, Error>
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+
         T: ColumnSpec,
         C: Fn(&K) -> Ordering,
     {
@@ -2034,7 +2087,7 @@ where
     }
     fn absolute_position<S, N, T>(&self, row_group: &RowGroup<S, K, A, N, T>) -> u64
     where
-        S: StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
     {
         match self {
@@ -2045,7 +2098,7 @@ where
     }
     fn remaining_rows<S, N, T>(&self, row_group: &RowGroup<S, K, A, N, T>) -> u64
     where
-        S: StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         T: ColumnSpec,
     {
         match self {

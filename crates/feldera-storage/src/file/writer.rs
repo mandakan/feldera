@@ -16,7 +16,6 @@ use binrw::{
     io::{Cursor, NoSeek},
     BinWrite,
 };
-use crc32c::crc32c;
 use rkyv::{archived_value, Archive, Deserialize, Infallible, Serialize};
 
 use crate::{
@@ -24,7 +23,7 @@ use crate::{
         FileHandle, ImmutableFileHandle, StorageControl, StorageError, StorageExecutor,
         StorageRead, StorageWrite,
     },
-    buffer_cache::{FBuf, FBufSerializer},
+    buffer_cache::{BufferCache, FBuf, FBufSerializer},
     file::{
         format::{
             BlockHeader, DataBlockHeader, FileTrailer, FileTrailerColumn, FixedLen,
@@ -37,6 +36,7 @@ use crate::{
 use rkyv::ser::Serializer as RkyvSerializer;
 
 use super::{
+    cache::FileCacheEntry,
     reader::{ImmutableFileRef, Reader},
     Rkyv, Serializer,
 };
@@ -221,7 +221,7 @@ impl ColumnWriter {
         block_writer: &mut BlockWriter<W>,
     ) -> Result<FileTrailerColumn, StorageError>
     where
-        W: StorageWrite + StorageControl + StorageExecutor,
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv,
         A: Rkyv,
     {
@@ -279,7 +279,7 @@ impl ColumnWriter {
         data_block: DataBlock<K>,
     ) -> Result<(), StorageError>
     where
-        W: StorageWrite + StorageControl + StorageExecutor,
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv,
     {
         let location = block_writer.write_block(data_block.raw)?;
@@ -301,7 +301,7 @@ impl ColumnWriter {
         mut level: usize,
     ) -> Result<(BlockLocation, u64), StorageError>
     where
-        W: StorageWrite + StorageControl + StorageExecutor,
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv,
     {
         loop {
@@ -327,7 +327,7 @@ impl ColumnWriter {
         row_group: &Option<Range<u64>>,
     ) -> Result<(), StorageError>
     where
-        W: StorageWrite + StorageControl + StorageExecutor,
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv,
         A: Rkyv,
     {
@@ -825,38 +825,36 @@ impl IndexBlockBuilder {
 
 struct BlockWriter<W>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
-    storage: Rc<W>,
+    cache: Rc<BufferCache<W, FileCacheEntry>>,
     file_handle: Option<FileHandle>,
     offset: u64,
 }
 
 impl<W> BlockWriter<W>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
-    fn new(storage: &Rc<W>, file_handle: FileHandle) -> Self {
+    fn new(cache: &Rc<BufferCache<W, FileCacheEntry>>, file_handle: FileHandle) -> Self {
         Self {
-            storage: storage.clone(),
+            cache: cache.clone(),
             file_handle: Some(file_handle),
             offset: 0,
         }
     }
 
     fn complete(mut self) -> Result<(ImmutableFileHandle, PathBuf), StorageError> {
-        self.storage
-            .block_on(self.storage.complete(self.file_handle.take().unwrap()))
+        self.cache
+            .block_on(self.cache.complete(self.file_handle.take().unwrap()))
     }
 
     fn write_block(&mut self, mut block: FBuf) -> Result<BlockLocation, StorageError> {
         block.resize(block.len().max(4096).next_power_of_two(), 0);
-        let checksum = crc32c(&block[4..]).to_le_bytes();
-        block[..4].copy_from_slice(checksum.as_slice());
 
         let location = BlockLocation::new(self.offset, block.len()).unwrap();
         self.offset += block.len() as u64;
-        self.storage.block_on(self.storage.write_block(
+        self.cache.block_on(self.cache.write(
             self.file_handle.as_ref().unwrap(),
             location.offset,
             block,
@@ -867,12 +865,12 @@ where
 
 impl<W> Drop for BlockWriter<W>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
         self.file_handle
             .take()
-            .map(|file_handle| self.storage.block_on(self.storage.delete_mut(file_handle)));
+            .map(|file_handle| self.cache.block_on(self.cache.delete_mut(file_handle)));
     }
 }
 
@@ -884,7 +882,7 @@ where
 /// 1-column and 2-column layer files, respectively, with added type safety.
 struct Writer<W>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     writer: BlockWriter<W>,
     cws: Vec<ColumnWriter>,
@@ -893,10 +891,10 @@ where
 
 impl<W> Writer<W>
 where
-    W: StorageControl + StorageWrite + StorageExecutor,
+    W: StorageRead + StorageControl + StorageWrite + StorageExecutor,
 {
     pub fn new(
-        writer: &Rc<W>,
+        writer: &Rc<BufferCache<W, FileCacheEntry>>,
         parameters: Parameters,
         n_columns: usize,
     ) -> Result<Self, StorageError> {
@@ -968,8 +966,8 @@ where
         self.cws[0].rows.end
     }
 
-    pub fn storage(&self) -> &Rc<W> {
-        &self.writer.storage
+    pub fn storage(&self) -> &Rc<BufferCache<W, FileCacheEntry>> {
+        &self.writer.cache
     }
 }
 
@@ -984,10 +982,8 @@ where
 /// through `(999, ())`.
 ///
 /// ```
-/// # use feldera_storage::file::writer::{Parameters, Writer1};
-/// # use feldera_storage::backend::DefaultBackend;
-/// let mut file =
-///     Writer1::new(&DefaultBackend::default_for_thread(), Parameters::default()).unwrap();
+/// # use feldera_storage::file::{cache::BufferCache, writer::{Parameters, Writer1}};
+/// let mut file = Writer1::new(&BufferCache::default_for_thread(), Parameters::default()).unwrap();
 /// for i in 0..1000_u32 {
 ///     file.write0((&i, &())).unwrap();
 /// }
@@ -995,7 +991,7 @@ where
 /// ```
 pub struct Writer1<W, K0, A0>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K0: Rkyv,
     A0: Rkyv,
 {
@@ -1003,14 +999,17 @@ where
     _phantom: PhantomData<(K0, A0)>,
 }
 
-impl<S, K0, A0> Writer1<S, K0, A0>
+impl<W, K0, A0> Writer1<W, K0, A0>
 where
-    S: StorageControl + StorageWrite + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K0: Rkyv + Ord,
     A0: Rkyv,
 {
     /// Creates a new writer with the given parameters.
-    pub fn new(storage: &Rc<S>, parameters: Parameters) -> Result<Self, StorageError> {
+    pub fn new(
+        storage: &Rc<BufferCache<W, FileCacheEntry>>,
+        parameters: Parameters,
+    ) -> Result<Self, StorageError> {
         Ok(Self {
             inner: Writer::new(storage, parameters, 1)?,
             _phantom: PhantomData,
@@ -1035,15 +1034,12 @@ where
     }
 
     /// Returns the storage used for this writer.
-    pub fn storage(&self) -> &Rc<S> {
+    pub fn storage(&self) -> &Rc<BufferCache<W, FileCacheEntry>> {
         self.inner.storage()
     }
 
     /// Finishes writing the layer file and returns a reader for it.
-    pub fn into_reader(self) -> Result<Reader<S, (K0, A0, ())>, super::reader::Error>
-    where
-        S: StorageRead,
-    {
+    pub fn into_reader(self) -> Result<Reader<W, (K0, A0, ())>, super::reader::Error> {
         let storage = self.storage().clone();
         let (file_handle, path) = self.close()?;
         Reader::new(Rc::new(ImmutableFileRef::new(&storage, file_handle, path)))
@@ -1068,10 +1064,8 @@ where
 /// `(0, ())` through `(9, ())`.
 ///
 /// ```
-/// # use feldera_storage::file::writer::{Parameters, Writer2};
-/// # use feldera_storage::backend::DefaultBackend;
-/// let mut file =
-///     Writer2::new(&DefaultBackend::default_for_thread(), Parameters::default()).unwrap();
+/// # use feldera_storage::file::{cache::BufferCache, writer::{Parameters, Writer2}};
+/// let mut file = Writer2::new(&BufferCache::default_for_thread(), Parameters::default()).unwrap();
 /// for i in 0..1000_u32 {
 ///     for j in 0..10_u32 {
 ///         file.write1((&j, &())).unwrap();
@@ -1082,7 +1076,7 @@ where
 /// ```
 pub struct Writer2<W, K0, A0, K1, A1>
 where
-    W: StorageWrite + StorageControl + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K0: Rkyv + Ord,
     A0: Rkyv,
     K1: Rkyv + Ord,
@@ -1092,16 +1086,19 @@ where
     _phantom: PhantomData<(K0, A0, K1, A1)>,
 }
 
-impl<S, K0, A0, K1, A1> Writer2<S, K0, A0, K1, A1>
+impl<W, K0, A0, K1, A1> Writer2<W, K0, A0, K1, A1>
 where
-    S: StorageControl + StorageWrite + StorageExecutor,
+    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     K0: Rkyv + Ord,
     A0: Rkyv,
     K1: Rkyv + Ord,
     A1: Rkyv,
 {
     /// Creates a new writer with the given parameters.
-    pub fn new(storage: &Rc<S>, parameters: Parameters) -> Result<Self, StorageError> {
+    pub fn new(
+        storage: &Rc<BufferCache<W, FileCacheEntry>>,
+        parameters: Parameters,
+    ) -> Result<Self, StorageError> {
         Ok(Self {
             inner: Writer::new(storage, parameters, 2)?,
             _phantom: PhantomData,
@@ -1141,16 +1138,13 @@ where
     }
 
     /// Returns the storage used for this writer.
-    pub fn storage(&self) -> &Rc<S> {
+    pub fn storage(&self) -> &Rc<BufferCache<W, FileCacheEntry>> {
         self.inner.storage()
     }
 
     /// Finishes writing the layer file and returns a reader for it.
     #[allow(clippy::type_complexity)]
-    pub fn into_reader(self) -> Result<Reader<S, (K0, A0, (K1, A1, ()))>, super::reader::Error>
-    where
-        S: StorageRead,
-    {
+    pub fn into_reader(self) -> Result<Reader<W, (K0, A0, (K1, A1, ()))>, super::reader::Error> {
         let storage = self.storage().clone();
         let (file_handle, path) = self.close()?;
         Reader::new(Rc::new(ImmutableFileRef::new(&storage, file_handle, path)))

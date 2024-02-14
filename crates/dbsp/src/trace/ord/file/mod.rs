@@ -10,5 +10,4 @@ pub use key_batch::FileKeyBatch;
 pub use val_batch::FileValBatch;
 pub use zset_batch::FileZSet;
 
-pub type StorageBackend =
-    feldera_storage::buffer_cache::BufferCache<feldera_storage::backend::DefaultBackend>;
+pub type StorageBackend = feldera_storage::backend::DefaultBackend;

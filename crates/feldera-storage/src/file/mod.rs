@@ -83,6 +83,7 @@ use rkyv::{
 
 use crate::buffer_cache::{FBuf, FBufSerializer};
 
+pub mod cache;
 pub mod format;
 pub mod reader;
 pub mod writer;
@@ -171,10 +172,11 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::{fmt::Debug, rc::Rc};
+    use std::fmt::Debug;
 
     use crate::{
-        backend::{DefaultBackend, StorageControl, StorageExecutor, StorageRead, StorageWrite},
+        backend::{StorageControl, StorageExecutor, StorageRead, StorageWrite},
+        buffer_cache::BufferCache,
         test::init_test_logger,
     };
 
@@ -210,7 +212,7 @@ mod test {
         after: &K,
         aux: A,
     ) where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv + Debug + Ord + Eq + Clone,
         A: Rkyv + Debug + Eq + Clone,
         T: ColumnSpec,
@@ -250,7 +252,7 @@ mod test {
 
     fn test_out_of_range<S, K, A, N, T>(row_group: &RowGroup<S, K, A, N, T>, before: &K, after: &K)
     where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv + Debug + Ord + Eq + Clone,
         A: Rkyv + Debug + Eq + Clone,
         T: ColumnSpec,
@@ -279,7 +281,7 @@ mod test {
         n: usize,
         expected: impl Fn(usize) -> (K, K, K, A),
     ) where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv + Debug + Ord + Eq + Clone,
         A: Rkyv + Debug + Eq + Clone,
         T: ColumnSpec,
@@ -350,7 +352,7 @@ mod test {
         n: usize,
         expected: impl Fn(usize) -> (K, K, K, A),
     ) where
-        S: StorageRead + StorageControl + StorageExecutor,
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
         K: Rkyv + Debug + Ord + Eq + Clone,
         A: Rkyv + Debug + Eq + Clone,
         T: ColumnSpec,
@@ -366,12 +368,11 @@ mod test {
         })
     }
 
-    fn test_two_columns<S, T>(storage: &Rc<S>, parameters: Parameters)
+    fn test_two_columns<T>(parameters: Parameters)
     where
-        S: StorageControl + StorageRead + StorageWrite + StorageExecutor,
         T: TwoColumns,
     {
-        let mut layer_file = Writer2::new(storage, parameters).unwrap();
+        let mut layer_file = Writer2::new(&BufferCache::default_for_thread(), parameters).unwrap();
         let n0 = T::n0();
         for row0 in 0..n0 {
             for row1 in 0..T::n1(row0) {
@@ -403,10 +404,7 @@ mod test {
         }
     }
 
-    fn test_2_columns_helper<S>(storage: &Rc<S>, parameters: Parameters)
-    where
-        S: StorageControl + StorageRead + StorageWrite + StorageExecutor,
-    {
+    fn test_2_columns_helper(parameters: Parameters) {
         struct TwoInts;
         impl TwoColumns for TwoInts {
             type K0 = i32;
@@ -443,44 +441,30 @@ mod test {
             }
         }
 
-        test_two_columns::<_, TwoInts>(storage, parameters);
+        test_two_columns::<TwoInts>(parameters);
     }
 
     #[test]
     fn test_2_columns() {
         init_test_logger();
-        test_2_columns_helper(&DefaultBackend::default_for_thread(), Parameters::default());
-    }
-
-    #[cfg(feature = "glommio")]
-    #[test]
-    fn test_2_columns_glommio() {
-        use crate::backend::glommio_impl::GlommioBackend;
-
-        init_test_logger();
-        test_2_columns_helper(&GlommioBackend::default_for_thread(), Parameters::default());
+        test_2_columns_helper(Parameters::default());
     }
 
     #[test]
     fn test_2_columns_max_branch_2() {
         init_test_logger();
-        test_2_columns_helper(
-            &DefaultBackend::default_for_thread(),
-            Parameters::with_max_branch(2),
-        );
+        test_2_columns_helper(Parameters::with_max_branch(2));
     }
 
-    fn test_one_column<S, K, A>(
-        storage: &Rc<S>,
+    fn test_one_column<K, A>(
         n: usize,
         expected: impl Fn(usize) -> (K, K, K, A),
         parameters: Parameters,
     ) where
-        S: StorageControl + StorageRead + StorageWrite + StorageExecutor,
         K: Rkyv + Debug + Ord + Eq + Clone,
         A: Rkyv + Debug + Eq + Clone,
     {
-        let mut writer = Writer1::new(storage, parameters).unwrap();
+        let mut writer = Writer1::new(&BufferCache::default_for_thread(), parameters).unwrap();
         for row in 0..n {
             let (_before, key, _after, aux) = expected(row);
             writer.write0((&key, &aux)).unwrap();
@@ -494,7 +478,6 @@ mod test {
     fn test_i64_helper(parameters: Parameters) {
         init_test_logger();
         test_one_column(
-            &DefaultBackend::default_for_thread(),
             1000,
             |row| (row * 2, row * 2 + 1, row * 2 + 2, ()),
             parameters,
@@ -529,7 +512,6 @@ mod test {
 
         init_test_logger();
         test_one_column(
-            &DefaultBackend::default_for_thread(),
             1000,
             |row| (f(row * 2), f(row * 2 + 1), f(row * 2 + 2), ()),
             Parameters::default(),
@@ -540,7 +522,6 @@ mod test {
     fn test_tuple() {
         init_test_logger();
         test_one_column(
-            &DefaultBackend::default_for_thread(),
             1000,
             |row| ((row, 0), (row, 1), (row, 2), row),
             Parameters::default(),
@@ -554,7 +535,6 @@ mod test {
         }
         init_test_logger();
         test_one_column(
-            &DefaultBackend::default_for_thread(),
             500,
             |row| (v(row * 2), v(row * 2 + 1), v(row * 2 + 2), ()),
             Parameters::default(),
