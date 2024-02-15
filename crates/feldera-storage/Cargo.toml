@@ -37,4 +37,4 @@ proptest-state-machine = { version = "0.1.0" }
 futures = { version = "0.3.30", features = ["executor"] }
 pretty_assertions = { version = "1.4" }
 chrono = "0.4.33"
-env_logger = "0.10.0"
+env_logger = "0.11.2"

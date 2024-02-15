@@ -586,6 +586,69 @@ impl DBSPHandle {
         Ok(self.checkpoint_list.clone().into())
     }
 
+    fn gather_batches_for_checkpoint(&self, commit_id: u64) -> Result<HashSet<String>, DBSPError> {
+        let mut batch_files_in_commit: HashSet<String> = HashSet::new();
+        let cp_spine_file_prefix = format!("pspine-batches-{}", commit_id);
+
+        let storage = self.runtime.as_ref().unwrap().runtime().storage_path();
+        let files = fs::read_dir(storage)?;
+        for file in files {
+            let file = file?;
+            let path = file.path();
+            let file_name = path.file_name().unwrap().to_string_lossy();
+
+            if file_name.starts_with(&cp_spine_file_prefix) {
+                let content = fs::read(file.path())?;
+                let archived = rkyv::check_archived_root::<Vec<String>>(&content).unwrap();
+                archived.iter().for_each(|s| {
+                    batch_files_in_commit.insert(s.to_string());
+                });
+            }
+        }
+        Ok(batch_files_in_commit)
+    }
+
+    /// Remove the oldest checkpoint from the list.
+    ///
+    /// This method is a no-op if there are less than two checkpoints.
+    pub fn gc_checkpoint(&mut self) -> Result<(), DBSPError> {
+        const MIN_CHECKPOINT_THRESHOLD: usize = 2;
+        // Ensures that we can unwrap call to pop_front, and front:
+        static_assertions::const_assert!(MIN_CHECKPOINT_THRESHOLD >= 2);
+
+        if self.checkpoint_list.len() > MIN_CHECKPOINT_THRESHOLD {
+            let cp_to_remove = self.checkpoint_list.pop_front().unwrap();
+            let next_to_remove = *self.checkpoint_list.front().unwrap();
+
+            let potentially_remove = self.gather_batches_for_checkpoint(cp_to_remove)?;
+            let need_to_keep = self.gather_batches_for_checkpoint(next_to_remove)?;
+
+            let to_remove = potentially_remove
+                .difference(&need_to_keep)
+                .collect::<Vec<_>>();
+
+            eprintln!(
+                "cp_to_remove={} potentially_remove {:?} need_to_keep {:?} to_remove: {:?}",
+                cp_to_remove, potentially_remove, need_to_keep, to_remove
+            );
+
+            for remove in to_remove.iter() {
+                eprintln!("removing file {}", remove);
+                match fs::remove_file(remove) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!(
+                            "Unable to remove old-checkpoint data-file {}: {}",
+                            remove,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Enable CPU profiler.
     ///
     /// Enable recording of CPU usage info.  When CPU profiling is enabled,
@@ -808,5 +871,74 @@ mod tests {
             Err(DBSPError::Constructor(msg)) => assert_eq!(msg.to_string(), "constructor failed"),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn test_commit() {
+        use crate::{operator::FilterMap, utils::Tup2, Runtime, Stream};
+        use size_of::SizeOf;
+        use std::cmp::max;
+
+        let _r = env_logger::try_init();
+
+        let (mut dbsp, input_handle) = Runtime::init_circuit(1, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let stream = stream.shard();
+            let watermark: Stream<_, (i32, i32)> = stream.waterline(
+                || (i32::MIN, i32::MIN),
+                |k, v| (*k, *v),
+                |(ts1_left, ts2_left), (ts1_right, ts2_right)| {
+                    (max(*ts1_left, *ts1_right), max(*ts2_left, *ts2_right))
+                },
+            );
+
+            let _trace = stream.integrate_trace();
+            let retain_keys =
+                stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
+            retain_keys.apply(|trace| {
+                //println!("retain_keys: {}bytes", trace.size_of().total_bytes());
+                assert!(trace.size_of().total_bytes() < 15000);
+            });
+
+            Ok(handle)
+        })
+        .unwrap();
+
+        let cid = dbsp.commit().expect("commit failed");
+        eprintln!(" === cid={:?} ===", cid);
+
+        let batches: Vec<Vec<((i32, i32), i32)>> = vec![
+            vec![((1, 2), 1)],
+            vec![((2, 3), 1)],
+            vec![((3, 4), 1)],
+            vec![((3, 4), 1)],
+            vec![((1, 2), 1)],
+            vec![((2, 3), 1)],
+            vec![((3, 4), 1)],
+            vec![((3, 4), 1)],
+        ];
+        for batches in batches.chunks(2) {
+            eprintln!(" === starting new iteration ===");
+            let mut tuples = batches
+                .iter()
+                .map(|batch| {
+                    batch
+                        .iter()
+                        .map(|((k, v), r)| (*k, Tup2(*v, *r)))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            input_handle.append(&mut tuples[0]);
+            input_handle.append(&mut tuples[1]);
+            dbsp.step().unwrap();
+            let cid = dbsp.commit().expect("commit failed");
+            eprintln!(" === cid={:?} done ===", cid);
+        }
+
+        eprintln!("list_checkpoints={:?}", dbsp.list_checkpoints());
+        let _r = dbsp.gc_checkpoint();
+        let _r = dbsp.gc_checkpoint();
+        let _r = dbsp.gc_checkpoint();
+        let _r = dbsp.gc_checkpoint();
     }
 }

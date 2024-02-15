@@ -65,6 +65,7 @@ derive_more = { version = "0.99.17", features = ["add", "not", "from"] }
 feldera-storage = { path = "../feldera-storage" }
 ouroboros = "0.18.1"
 tempfile = "3.10.0"
+static_assertions = "1.1.0"
 
 [dev-dependencies]
 csv = "1.2.2"

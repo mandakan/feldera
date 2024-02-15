@@ -39,6 +39,7 @@ pub mod layers;
 pub mod ord;
 #[cfg(feature = "persistence")]
 pub mod persistent;
+pub mod pspine;
 pub mod spine_fueled;
 
 pub use cursor::{Consumer, Cursor, ValueConsumer};
@@ -46,7 +47,7 @@ use feldera_storage::buffer_cache::FBuf;
 pub use feldera_storage::file::{Deserializable, Deserializer, Rkyv, Serializer};
 
 #[cfg(feature = "persistence")]
-pub use persistent::PersistentTrace as Spine;
+pub use pspine::Spine;
 #[cfg(not(feature = "persistence"))]
 pub use spine_fueled::Spine;
 

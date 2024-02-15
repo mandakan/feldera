@@ -868,9 +868,11 @@ where
     W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
+        /*
         self.file_handle
             .take()
             .map(|file_handle| self.cache.block_on(self.cache.delete_mut(file_handle)));
+         */
     }
 }
 
