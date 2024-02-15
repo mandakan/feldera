@@ -897,41 +897,36 @@ mod tests {
         })
         .unwrap();
 
-        let cid = dbsp.commit().expect("commit failed");
-        eprintln!(" === cid={:?} ===", cid);
+        //let cid = dbsp.commit().expect("commit failed");
+        //eprintln!(" === cid={:?} ===", cid);
 
-        let batches: Vec<Vec<((i32, i32), i32)>> = vec![
-            vec![((1, 2), 1)],
-            vec![((2, 3), 1)],
-            vec![((3, 4), 1)],
-            vec![((3, 4), 1)],
-            vec![((1, 2), 1)],
-            vec![((2, 3), 1)],
-            vec![((3, 4), 1)],
-            vec![((3, 4), 1)],
+        let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
+            vec![(1, Tup2(2, 1))],
+            vec![(2, Tup2(3, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(1, Tup2(2, 1))],
+            vec![(2, Tup2(3, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(3, Tup2(4, 1))],
         ];
-        for batches in batches.chunks(2) {
+        let batches_len = batches.len();
+        for mut batch in batches {
             eprintln!(" === starting new iteration ===");
-            let mut tuples = batches
-                .iter()
-                .map(|batch| {
-                    batch
-                        .iter()
-                        .map(|((k, v), r)| (*k, Tup2(*v, *r)))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            input_handle.append(&mut tuples[0]);
-            input_handle.append(&mut tuples[1]);
+            input_handle.append(&mut batch);
             dbsp.step().unwrap();
             let cid = dbsp.commit().expect("commit failed");
             eprintln!(" === cid={:?} done ===", cid);
         }
 
         eprintln!("list_checkpoints={:?}", dbsp.list_checkpoints());
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
+        for _in in 0..batches_len {
+            let _r = dbsp.gc_checkpoint();
+        }
+        assert_eq!(
+            dbsp.list_checkpoints().expect("has some checkpoints").len(),
+            2,
+            "We keep at least 2 checkpoints"
+        );
     }
 }

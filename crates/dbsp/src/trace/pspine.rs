@@ -115,7 +115,6 @@ use super::Filter;
 #[derive(rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 struct CommittedSpine<B: Batch> {
     batches: Vec<String>,
-    merged: Vec<(String, String)>,
     lower: Vec<B::Time>,
     upper: Vec<B::Time>,
     effort: u64,
@@ -136,8 +135,6 @@ where
     B: Batch,
 {
     merging: Vec<MergeState<B>>,
-    /// Files that we merged as part of the current snapshot.
-    merged: Vec<Tup2<PathBuf, PathBuf>>,
     lower: Antichain<B::Time>,
     upper: Antichain<B::Time>,
     effort: usize,
@@ -821,10 +818,8 @@ where
         let batchlist_path =
             path.join(format!("pspine-batches-{}-{}.dat", cid, self.persistent_id));
         //let fd = storage.block_on(async { storage.create_named(path).await })?;
-        let batches = committed.batches;
-
-        let as_bytes =
-            feldera_storage::file::to_bytes(&batches).expect("failed to serialize spine data");
+        let as_bytes = feldera_storage::file::to_bytes(&committed.batches)
+            .expect("failed to serialize bach list");
         //as_bytes.resize(max(512, as_bytes.len().next_power_of_two()), 0);
         //std::fs::write(batchlist_path, as_bytes).expect("failed to write spine
         // data");
@@ -853,7 +848,6 @@ impl<B: Batch> From<&Spine<B>> for CommittedSpine<B> {
 
         CommittedSpine {
             batches,
-            merged: Vec::new(),
             lower: value.lower.clone().into(),
             upper: value.upper.clone().into(),
             effort: value.effort as u64,
@@ -927,7 +921,6 @@ where
             lower: Antichain::from_elem(B::Time::minimum()),
             upper: Antichain::new(),
             merging: Vec::new(),
-            merged: Vec::new(),
             effort,
             activator,
             dirty: false,
@@ -1131,7 +1124,6 @@ where
                 batch.as_ref().unwrap().persistent_id(),
                 lineage
             );
-            self.merged.push(lineage);
         }
         batch
     }
