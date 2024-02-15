@@ -650,17 +650,6 @@ where
     }
 }
 
-impl<B> Default for Spine<B>
-where
-    B: Batch,
-    B::Key: Ord,
-    B::Val: Ord,
-{
-    fn default() -> Self {
-        <Self as Trace>::new(None)
-    }
-}
-
 impl<B> Trace for Spine<B>
 where
     B: Batch,

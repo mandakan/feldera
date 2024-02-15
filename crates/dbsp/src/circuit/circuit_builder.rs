@@ -791,6 +791,8 @@ pub trait Node {
 
     fn map_nodes_recursive(&self, _f: &mut dyn FnMut(&dyn Node)) {}
 
+    fn map_nodes_recursive_mut(&self, _f: &mut dyn FnMut(&mut dyn Node)) {}
+
     fn commit(&self, cid: usize) -> Result<(), DBSPError>;
 }
 

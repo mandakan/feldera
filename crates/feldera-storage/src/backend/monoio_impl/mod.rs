@@ -125,6 +125,7 @@ impl MonoioBackend {
 impl StorageControl for MonoioBackend {
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
         let path = self.base.join(name);
+        eprintln!("Creating file: {:?}", path);
         let file = open_as_direct(
             &path,
             OpenOptions::new().create_new(true).write(true).read(true),

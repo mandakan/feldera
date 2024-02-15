@@ -913,9 +913,9 @@ where
     S: StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
-        let _ = self
-            .storage
-            .block_on(self.storage.delete(self.file_handle.take().unwrap()));
+        /*let _ = self
+        .storage
+        .block_on(self.storage.delete(self.file_handle.take().unwrap()));*/
     }
 }
 
@@ -924,6 +924,7 @@ where
     S: StorageControl + StorageExecutor,
 {
     file: Rc<ImmutableFileRef<S>>,
+    /// Location of the file on disk.
     columns: Vec<Column>,
 
     /// `fn() -> T` is `Send` and `Sync` regardless of `T`.  See
