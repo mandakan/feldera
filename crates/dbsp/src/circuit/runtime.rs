@@ -1,11 +1,13 @@
 //! A multithreaded runtime for evaluating DBSP circuits in a data-parallel
 //! fashion.
 
+use crate::trace::ord::file::StorageBackend;
 use crate::DetailedError;
 use crossbeam::channel::bounded;
 use crossbeam_utils::sync::{Parker, Unparker};
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::rc::Rc;
 use std::{
     backtrace::Backtrace,
     borrow::Cow,
@@ -14,6 +16,7 @@ use std::{
     fmt,
     fmt::{Debug, Display, Error as FmtError, Formatter},
     panic::{self, Location, PanicInfo},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
@@ -22,7 +25,7 @@ use std::{
 };
 use typedmap::{TypedDashMap, TypedMapKey};
 
-use super::dbsp_handle::{IntoLayout, Layout};
+use super::dbsp_handle::{IntoCircuitConfig, Layout};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Error {
@@ -169,6 +172,7 @@ impl WorkerPanicInfo {
 
 struct RuntimeInner {
     layout: Layout,
+    storage: PathBuf,
     store: LocalStore,
     // Panic info collected from failed worker threads.
     panic_info: Vec<RwLock<Option<WorkerPanicInfo>>>,
@@ -178,12 +182,13 @@ impl Debug for RuntimeInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimeInner")
             .field("layout", &self.layout)
+            .field("storage", &self.storage)
             .finish()
     }
 }
 
 impl RuntimeInner {
-    fn new(layout: Layout) -> Self {
+    fn new(layout: Layout, storage: PathBuf) -> Self {
         let local_workers = layout.local_workers().len();
         let mut panic_info = Vec::with_capacity(local_workers);
         for _ in 0..local_workers {
@@ -192,6 +197,7 @@ impl RuntimeInner {
 
         Self {
             layout,
+            storage,
             store: TypedDashMap::new(),
             panic_info,
         }
@@ -284,14 +290,15 @@ impl Runtime {
     /// hruntime.join().unwrap();
     /// # }
     /// ```
-    pub fn run<F>(layout: impl IntoLayout, circuit: F) -> RuntimeHandle
+    pub fn run<F>(cconf: impl IntoCircuitConfig, circuit: F) -> RuntimeHandle
     where
         F: FnOnce() + Clone + Send + 'static,
     {
-        let layout = layout.into_layout();
+        let storage = cconf.storage();
+        let layout = cconf.layout();
         let workers = layout.local_workers();
         let nworkers = workers.len();
-        let runtime = Self(Arc::new(RuntimeInner::new(layout)));
+        let runtime = Self(Arc::new(RuntimeInner::new(layout, storage)));
 
         // Install custom panic hook.
         let default_hook = default_panic_hook();
@@ -310,7 +317,7 @@ impl Runtime {
                 .spawn(move || {
                     // Set the worker's runtime handle and index
                     RUNTIME.with(|rt| *rt.borrow_mut() = Some(runtime));
-                    WORKER_INDEX.with(|idx| idx.set(worker_index));
+                    WORKER_INDEX.set(worker_index);
 
                     // Send the main thread our parker and kill signal
                     // TODO: Share a single kill signal across all workers
@@ -354,11 +361,22 @@ impl Runtime {
         RUNTIME.with(|rt| rt.borrow().clone())
     }
 
+    /// Returns the (thread-local) storage backend.
+    pub fn storage() -> Rc<StorageBackend> {
+        thread_local! {
+            pub static DEFAULT_BACKEND: Rc<StorageBackend> = {
+                let st = Runtime::runtime().as_ref().expect("Runtime::storage() called on non-dbsp worker thread.").inner().storage.clone();
+                Rc::new(StorageBackend::with_base(st))
+            };
+        }
+        DEFAULT_BACKEND.with(|rc| rc.clone())
+    }
+
     /// Returns 0-based index of the current worker thread within its runtime.
     /// For threads that run without a runtime, this method returns `0`.  In a
     /// multihost runtime, this is a global index across all hosts.
     pub fn worker_index() -> usize {
-        WORKER_INDEX.with(|index| index.get())
+        WORKER_INDEX.get()
     }
 
     fn inner(&self) -> &RuntimeInner {
@@ -388,6 +406,11 @@ impl Runtime {
     /// types.  See `typedmap` crate documentation for details.
     pub fn local_store(&self) -> &LocalStore {
         &self.inner().store
+    }
+
+    /// Returns the path to the storage directory for this runtime.
+    pub fn storage_path(&self) -> &PathBuf {
+        &self.inner().storage
     }
 
     /// A per-worker sequential counter.

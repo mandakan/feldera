@@ -7,6 +7,7 @@ use core::fmt;
 use crossbeam::channel::{bounded, Receiver, Select, Sender, TryRecvError};
 use itertools::Either;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -201,21 +202,46 @@ impl Display for LayoutError {
 
 impl StdError for LayoutError {}
 
-/// Convenience trait that allows specifying a [`Layout`] as a `usize` for a
-/// single-machine layout with the specified number of worker threads,
-pub trait IntoLayout {
-    fn into_layout(self) -> Layout;
+/// A config for instantiating a multithreaded/multihost runtime to execute
+/// circuits.
+///
+/// As opposed to `RuntimeConfig`, this struct stores state about which hosts
+/// run the circuit and where they store data, e.g., state typically not
+/// tunable/exposed by the user.
+pub struct CircuitConfig {
+    pub layout: Layout,
+    pub storage: PathBuf,
 }
 
-impl IntoLayout for usize {
-    fn into_layout(self) -> Layout {
-        Layout::new_solo(self)
+impl IntoCircuitConfig for CircuitConfig {
+    fn layout(&self) -> Layout {
+        self.layout.clone()
+    }
+
+    fn storage(&self) -> PathBuf {
+        self.storage.clone()
     }
 }
 
-impl IntoLayout for Layout {
-    fn into_layout(self) -> Layout {
-        self
+/// Convenience trait that allows specifying a [`Layout`] as a `usize` for a
+/// single-machine layout with the specified number of worker threads,
+pub trait IntoCircuitConfig {
+    fn layout(&self) -> Layout;
+
+    fn storage(&self) -> PathBuf {
+        tempfile::tempdir().unwrap().into_path()
+    }
+}
+
+impl IntoCircuitConfig for usize {
+    fn layout(&self) -> Layout {
+        Layout::new_solo(*self)
+    }
+}
+
+impl IntoCircuitConfig for Layout {
+    fn layout(&self) -> Layout {
+        self.clone()
     }
 }
 
@@ -254,14 +280,14 @@ impl Runtime {
     /// TODO: Document other requirements.  Not all operators are currently
     /// thread-safe.
     pub fn init_circuit<F, T>(
-        layout: impl IntoLayout,
+        cconf: impl IntoCircuitConfig,
         constructor: F,
     ) -> Result<(DBSPHandle, T), DBSPError>
     where
         F: FnOnce(&mut RootCircuit) -> Result<T, AnyError> + Clone + Send + 'static,
         T: Send + 'static,
     {
-        let layout = layout.into_layout();
+        let layout = cconf.layout();
         let nworkers = layout.local_workers().len();
         let worker_ofs = layout.local_workers().start;
 
@@ -279,7 +305,7 @@ impl Runtime {
         let (status_senders, status_receivers): (Vec<_>, Vec<_>) =
             (0..nworkers).map(|_| bounded(1)).unzip();
 
-        let runtime = Self::run(layout, move || {
+        let runtime = Self::run(cconf, move || {
             let worker_index = Runtime::worker_index() - worker_ofs;
 
             // Drop all but one channels.  This makes sure that if one of the worker panics
@@ -288,7 +314,7 @@ impl Runtime {
             let status_sender = status_senders.into_iter().nth(worker_index).unwrap();
             let command_receiver = command_receivers.into_iter().nth(worker_index).unwrap();
 
-            let (circuit, profiler) = match RootCircuit::build(|circuit| {
+            let (mut circuit, profiler) = match RootCircuit::build(|circuit| {
                 let profiler = Profiler::new(circuit);
                 constructor(circuit).map(|res| (res, profiler))
             }) {
@@ -338,6 +364,12 @@ impl Runtime {
                             .send(Ok(Response::Profile(profiler.profile())))
                             .is_err()
                         {
+                            return;
+                        }
+                    }
+                    Ok(Command::Commit(cid)) => {
+                        circuit.commit(cid).expect("commit failed");
+                        if status_sender.send(Ok(Response::CheckpointCreated)).is_err() {
                             return;
                         }
                     }
@@ -404,12 +436,14 @@ enum Command {
     EnableProfiler,
     DumpProfile,
     RetrieveProfile,
+    Commit(usize),
 }
 
 enum Response {
     Unit,
     ProfileDump(String),
     Profile(WorkerProfile),
+    CheckpointCreated,
 }
 
 /// A handle to control the execution of a circuit in a multithreaded runtime.
@@ -423,6 +457,8 @@ pub struct DBSPHandle {
     // Channels used to receive command completion status from
     // workers.
     status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
+    commit_id: usize,
+    checkpoint_list: VecDeque<usize>,
 }
 
 impl DBSPHandle {
@@ -436,6 +472,8 @@ impl DBSPHandle {
             runtime: Some(runtime),
             command_senders,
             status_receivers,
+            commit_id: 0,
+            checkpoint_list: VecDeque::new(),
         }
     }
 

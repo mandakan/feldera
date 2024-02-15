@@ -505,7 +505,7 @@ mod test {
 
                 TestBatch::from_data(&output)
             } else {
-                TestBatch::new(None)
+                TestBatch::new(None, "")
             }
         }
     }
@@ -719,7 +719,7 @@ mod test {
             let (mut dbsp, (descr_handle, input_handle, output_handle)) =
                 Runtime::init_circuit(4, test_circuit).unwrap();
 
-            let mut ref_trace = TestBatch::new(None);
+            let mut ref_trace = TestBatch::new(None, "");
 
             for (batch, (start_key, start_val), before, after) in trace.into_iter() {
 

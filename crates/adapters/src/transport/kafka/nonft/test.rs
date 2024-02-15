@@ -1,3 +1,4 @@
+use crate::server::ServerArgs;
 use crate::{
     test::{
         generate_test_batches,
@@ -105,6 +106,7 @@ outputs:
 
     match Controller::with_config(
         |workers| Ok(test_circuit(workers)),
+        ServerArgs::default(),
         &config,
         Box::new(|e| panic!("error: {e}")),
     ) {
@@ -176,6 +178,7 @@ outputs:
 
     let controller = Controller::with_config(
         |workers| Ok(test_circuit(workers)),
+        ServerArgs::default(),
         &config,
         Box::new(move |e| if running_clone.load(Ordering::Acquire) {
             panic!("{test_name_clone}: error: {e}")

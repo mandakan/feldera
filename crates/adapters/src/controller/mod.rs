@@ -48,16 +48,16 @@ use crossbeam::{
     queue::SegQueue,
     sync::{Parker, ShardedLock, Unparker},
 };
+use dbsp::circuit::{CircuitConfig, Layout};
 use log::trace;
 use log::{debug, error, info};
 use pipeline_types::query::OutputQuery;
 use std::collections::HashMap;
-use std::sync::Condvar;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread::{spawn, JoinHandle},
     time::{Duration, Instant},
@@ -66,6 +66,7 @@ use std::{
 mod error;
 mod stats;
 
+use crate::server::ServerArgs;
 pub use error::{ConfigError, ControllerError};
 pub use pipeline_types::config::{
     ConnectorConfig, FormatConfig, InputEndpointConfig, OutputEndpointConfig, PipelineConfig,
@@ -128,12 +129,13 @@ impl Controller {
     /// * One or more of the endpoints fails to initialize.
     pub fn with_config<F>(
         circuit_factory: F,
+        args: ServerArgs,
         config: &PipelineConfig,
         error_cb: Box<dyn Fn(ControllerError) + Send + Sync>,
     ) -> Result<Self, ControllerError>
     where
         F: FnOnce(
-                usize,
+                CircuitConfig,
             )
                 -> Result<(Box<dyn DbspCircuitHandle>, Box<dyn CircuitCatalog>), ControllerError>
             + Send
@@ -147,6 +149,7 @@ impl Controller {
 
         let inner = Arc::new(ControllerInner::new(
             &config.global,
+            args,
             circuit_thread_unparker,
             backpressure_thread_unparker,
             error_cb,
@@ -412,13 +415,25 @@ impl Controller {
     ) -> Result<(), ControllerError>
     where
         F: FnOnce(
-            usize,
+            CircuitConfig,
         )
             -> Result<(Box<dyn DbspCircuitHandle>, Box<dyn CircuitCatalog>), ControllerError>,
     {
         let mut start: Option<Instant> = None;
 
-        let mut circuit = match circuit_factory(controller.status.global_config.workers as usize) {
+        let config = CircuitConfig {
+            layout: Layout::new_solo(controller.status.global_config.workers as usize),
+            storage: controller
+                .server_args
+                .storage_location
+                .clone()
+                .unwrap_or_else(|| {
+                    tempfile::tempdir()
+                        .map(|dir| dir.into_path())
+                        .expect("Can't create temporary storage")
+                }),
+        };
+        let mut circuit = match circuit_factory(config) {
             Ok((circuit, catalog)) => {
                 // Complete initialization before sending back the confirmation to
                 // prevent a race.
@@ -805,6 +820,7 @@ impl OutputEndpoints {
 /// A reference to this struct is held by each input probe and by both
 /// controller threads.
 struct ControllerInner {
+    server_args: ServerArgs,
     status: Arc<ControllerStatus>,
     num_api_connections: AtomicU64,
     dump_profile_request: AtomicBool,
@@ -829,6 +845,7 @@ struct ControllerInner {
 impl ControllerInner {
     fn new(
         global_config: &RuntimeConfig,
+        server_args: ServerArgs,
         circuit_thread_unparker: Unparker,
         backpressure_thread_unparker: Unparker,
         error_cb: Box<dyn Fn(ControllerError) + Send + Sync>,
@@ -837,6 +854,7 @@ impl ControllerInner {
         let dump_profile_request = AtomicBool::new(false);
 
         Self {
+            server_args,
             status,
             num_api_connections: AtomicU64::new(0),
             dump_profile_request,
@@ -1470,6 +1488,7 @@ mod test {
     use std::fs::remove_file;
     use tempfile::NamedTempFile;
 
+    use crate::server::ServerArgs;
     use proptest::prelude::*;
 
     // TODO: Parameterize this with config string, so we can test different
@@ -1525,11 +1544,11 @@ outputs:
             println!("input file: {}", temp_input_file.path().to_str().unwrap());
             println!("output file: {output_path}");
             let config: PipelineConfig = serde_yaml::from_str(&config_str).unwrap();
-
             let controller = Controller::with_config(
-                |workers| Ok(test_circuit(workers)),
-                &config,
-                Box::new(|e| panic!("error: {e}")),
+                    |circuit_config| Ok(test_circuit(circuit_config)),
+                    ServerArgs::default(),
+                    &config,
+                    Box::new(|e| panic!("error: {e}")),
                 )
                 .unwrap();
 
