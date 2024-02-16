@@ -2,7 +2,7 @@ use crate::{
     algebra::{Lattice, PartialOrder},
     circuit::Scope,
     time::{Product, Timestamp},
-    trace::ord::{FileValBatch, OrdKeyBatch, VecValBatch},
+    trace::ord::{FileKeyBatch, FileValBatch, OrdKeyBatch, VecValBatch},
     DBData, DBWeight,
 };
 use rkyv::{Archive, Deserialize, Serialize};
@@ -107,6 +107,7 @@ impl PartialOrder for NestedTimestamp32 {
 impl Timestamp for NestedTimestamp32 {
     type Nested = Product<Self, u32>;
     type FileValBatch<K: DBData, V: DBData, R: DBWeight> = FileValBatch<K, V, Self, R>;
+    type FileKeyBatch<K: DBData, R: DBWeight> = FileKeyBatch<K, Self, R>;
     type MemValBatch<K: DBData, V: DBData, R: DBWeight> = VecValBatch<K, V, Self, R>;
     type MemKeyBatch<K: DBData, R: DBWeight> = OrdKeyBatch<K, Self, R>;
 

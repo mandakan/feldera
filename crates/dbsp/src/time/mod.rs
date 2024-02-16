@@ -66,7 +66,10 @@ use crate::{
     algebra::{Lattice, PartialOrder},
     circuit::Scope,
     trace::{
-        ord::{FileIndexedZSet, FileValBatch, OrdKeyBatch, VecIndexedZSet, VecValBatch},
+        ord::{
+            FileIndexedZSet, FileKeyBatch, FileValBatch, FileZSet, OrdKeyBatch, VecIndexedZSet,
+            VecValBatch,
+        },
         Batch,
     },
     DBData, DBWeight, OrdZSet,
@@ -106,6 +109,10 @@ pub trait Timestamp:
     /// think of a better one.
     type FileValBatch<K: DBData, V: DBData, R: DBWeight>: Batch<Key = K, Val = V, Time = Self, R = R>
         + SizeOf;
+
+    /// A default `Batch` type for key-only batches using this timestamp, on
+    /// storage..
+    type FileKeyBatch<K: DBData, R: DBWeight>: Batch<Key = K, Val = (), Time = Self, R = R> + SizeOf;
 
     /// A default `Batch` type for batches using this timestamp, in memory.
     type MemValBatch<K: DBData, V: DBData, R: DBWeight>: Batch<Key = K, Val = V, Time = Self, R = R>
@@ -224,6 +231,7 @@ impl Timestamp for UnitTimestamp {
     type Nested = ();
 
     type FileValBatch<K: DBData, V: DBData, R: DBWeight> = FileValBatch<K, V, Self, R>;
+    type FileKeyBatch<K: DBData, R: DBWeight> = FileKeyBatch<K, Self, R>;
     type MemValBatch<K: DBData, V: DBData, R: DBWeight> = VecValBatch<K, V, Self, R>;
     type MemKeyBatch<K: DBData, R: DBWeight> = OrdKeyBatch<K, Self, R>;
 
@@ -251,6 +259,7 @@ impl Timestamp for () {
     type Nested = NestedTimestamp32;
 
     type FileValBatch<K: DBData, V: DBData, R: DBWeight> = FileIndexedZSet<K, V, R>;
+    type FileKeyBatch<K: DBData, R: DBWeight> = FileZSet<K, R>;
     type MemValBatch<K: DBData, V: DBData, R: DBWeight> = VecIndexedZSet<K, V, R>;
     type MemKeyBatch<K: DBData, R: DBWeight> = OrdZSet<K, R>;
 
@@ -268,6 +277,7 @@ impl Timestamp for u32 {
     type Nested = NestedTimestamp32;
 
     type FileValBatch<K: DBData, V: DBData, R: DBWeight> = FileValBatch<K, V, Self, R>;
+    type FileKeyBatch<K: DBData, R: DBWeight> = FileKeyBatch<K, Self, R>;
     type MemValBatch<K: DBData, V: DBData, R: DBWeight> = VecValBatch<K, V, Self, R>;
     type MemKeyBatch<K: DBData, R: DBWeight> = OrdKeyBatch<K, Self, R>;
 

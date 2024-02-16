@@ -210,10 +210,10 @@ where
     builder.done()
 }
 
-/// A key-only [`Spine`] of `C`'s default type of in-memory batches, with key
+/// A key-only [`Spine`] of `C`'s default type of on-storage batches, with key
 /// and weight types taken from `B`.
-pub type MemKeySpine<B, C> = Spine<
-    <<C as WithClock>::Time as Timestamp>::MemKeyBatch<
+pub type FileKeySpine<B, C> = Spine<
+    <<C as WithClock>::Time as Timestamp>::FileKeyBatch<
         <B as BatchReader>::Key,
         <B as BatchReader>::R,
     >,

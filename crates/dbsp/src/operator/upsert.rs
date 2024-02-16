@@ -11,7 +11,7 @@ use crate::{
 };
 use std::{borrow::Cow, marker::PhantomData, ops::Neg};
 
-use super::trace::{FileValSpine, MemKeySpine, TraceAppend};
+use super::trace::{FileKeySpine, FileValSpine, TraceAppend};
 
 impl<C, K> Stream<C, Vec<(K, Option<()>)>>
 where
@@ -71,7 +71,7 @@ where
 
             let delta = circuit
                 .add_binary_operator(
-                    <Upsert<MemKeySpine<B, C>, B>>::new(bounds.clone()),
+                    <Upsert<FileKeySpine<B, C>, B>>::new(bounds.clone()),
                     &local,
                     &self.try_sharded_version(),
                 )
@@ -79,7 +79,7 @@ where
             delta.mark_sharded_if(self);
 
             let trace = circuit.add_binary_operator_with_preference(
-                <TraceAppend<MemKeySpine<B, C>, B, C>>::new(circuit.clone()),
+                <TraceAppend<FileKeySpine<B, C>, B, C>>::new(circuit.clone()),
                 (&local, OwnershipPreference::STRONGLY_PREFER_OWNED),
                 (
                     &delta.try_sharded_version(),
