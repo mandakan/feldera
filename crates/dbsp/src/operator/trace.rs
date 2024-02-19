@@ -251,11 +251,15 @@ where
     where
         B: SpillableBatch,
     {
-        self.circuit()
+        let sharded = self.try_sharded_version();
+        let spilled = self
+            .circuit()
             .cache_get_or_insert_with(SpillId::new(self.origin_node_id().clone()), || {
-                self.apply(|batch| batch_add_time(batch, &()))
+                sharded.apply(|batch| batch_add_time(batch, &()))
             })
-            .clone()
+            .clone();
+        spilled.mark_sharded_if(self);
+        spilled
     }
 
     /// Record batches in `self` in a trace.
