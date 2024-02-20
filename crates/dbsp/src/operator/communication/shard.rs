@@ -144,14 +144,6 @@ where
                                     merge_batches(batches)
                                 });
 
-                            self.circuit().cache_insert(
-                                ShardId::new((
-                                    output.origin_node_id().clone(),
-                                    sharding_policy(self.circuit()),
-                                )),
-                                output.clone(),
-                            );
-
                             output
                         },
                     )
