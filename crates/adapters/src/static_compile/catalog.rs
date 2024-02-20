@@ -227,6 +227,7 @@ impl Catalog {
 
         // Output of the quantiles query, only produced when `num_quantiles>0`.
         let quantiles_stream = stream
+            .spill()
             .integrate_trace()
             .stream_key_quantiles(&num_quantiles_stream);
         let quantiles_handle = quantiles_stream
@@ -354,6 +355,7 @@ impl Catalog {
 
         // Output of the quantiles query, only produced when `num_quantiles>0`.
         let quantiles_stream = stream
+            .spill()
             .integrate_trace()
             .stream_unique_key_val_quantiles(&num_quantiles_stream);
         let quantiles_handle = quantiles_stream

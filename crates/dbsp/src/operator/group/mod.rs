@@ -320,7 +320,7 @@ where
             .add_ternary_operator(
                 GroupTransform::new(transform),
                 &stream,
-                &stream.integrate_trace().delay_trace(),
+                &stream.spill().integrate_trace().delay_trace(),
                 &feedback.delayed_trace,
             )
             .mark_sharded();

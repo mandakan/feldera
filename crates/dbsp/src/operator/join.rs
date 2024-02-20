@@ -157,10 +157,15 @@ impl<I1> Stream<RootCircuit, I1> {
         let left = self.shard();
         let right = other.shard();
 
-        left.integrate_trace()
+        left.spill()
+            .integrate_trace()
             .delay_trace()
             .stream_join_inner(&right, join_func.clone(), Location::caller())
-            .plus(&left.stream_join_inner(&right.integrate_trace(), join_func, Location::caller()))
+            .plus(&left.stream_join_inner(
+                &right.spill().integrate_trace(),
+                join_func,
+                Location::caller(),
+            ))
     }
 }
 
@@ -1205,7 +1210,7 @@ mod test {
                     |_from, label, to| Label(*to, *label),
                 ));
 
-                Ok(result.integrate_trace_in_memory().export())
+                Ok(result.integrate_trace().export())
             })
             .unwrap();
 
@@ -1343,7 +1348,7 @@ mod test {
                     //println!("counter: {}", *counter);
                     Ok(*counter == 2)
                 },
-                result.integrate_trace_in_memory().export()))
+                result.integrate_trace().export()))
             }).unwrap();
 
             result.consolidate().inspect(move |res: &OrdZSet<Label, i64>| {

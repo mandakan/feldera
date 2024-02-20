@@ -114,7 +114,7 @@ where
                         let output = circuit.add_ternary_operator(
                             RadixTreeAggregate::new(aggregator),
                             &stream,
-                            &stream.integrate_trace(),
+                            &stream.spill().integrate_trace(),
                             &feedback.delayed_trace,
                         );
 

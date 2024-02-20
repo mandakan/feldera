@@ -75,13 +75,17 @@ where
     pub fn window(
         &self,
         bounds: &Stream<C, (B::Key, B::Key)>,
-    ) -> Stream<C, <B as SpillableBatch>::Spilled> {
+    ) -> Stream<C, <B as SpillableBatch>::Spilled>
+    where
+        B: Send,
+    {
         let bound = TraceBound::new();
         let bound_clone = bound.clone();
         bounds.apply(move |(lower, _upper)| {
             bound_clone.set(lower.clone());
         });
         let trace = self
+            .spill()
             .integrate_trace_with_bound(bound, TraceBound::new())
             .delay_trace();
         self.circuit()

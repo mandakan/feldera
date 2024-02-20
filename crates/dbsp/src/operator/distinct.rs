@@ -129,7 +129,7 @@ where
                             circuit.add_binary_operator(
                                 DistinctIncrementalTotal::new(),
                                 &stream,
-                                &stream.integrate_trace().delay_trace(),
+                                &stream.spill().integrate_trace().delay_trace(),
                             )
                         } else {
                             // ```

@@ -15,9 +15,10 @@ use crate::{
 };
 use crate::{DBTimestamp, IndexedZSet};
 use size_of::SizeOf;
-use std::{borrow::Cow, cell::RefCell, marker::PhantomData, ops::DerefMut, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, marker::PhantomData, rc::Rc};
 
-circuit_cache_key!(TraceId<B, D, K, V>(GlobalNodeId => (Stream<B, D>, TraceBounds<K, V>)));
+circuit_cache_key!(TraceId<B, D>(GlobalNodeId => Stream<B, D>));
+circuit_cache_key!(BoundsId<K, V>(GlobalNodeId => TraceBounds<K, V>));
 circuit_cache_key!(DelayedTraceId<B, D>(GlobalNodeId => Stream<B, D>));
 circuit_cache_key!(SpillId<C, D>(GlobalNodeId => Stream<C, D>));
 
@@ -251,11 +252,26 @@ where
     where
         B: SpillableBatch,
     {
+        // We construct the trace bounds for the unspilled stream and copy it
+        // into the spilled stream, to ensure that `spilled.trace_bounds()` is
+        // the same as `self.trace_bounds()`.  This is an important property
+        // (see [`Self::trace_bounds`]).
+        //
+        // (We can't do this the same way as for sharded streams, by mapping
+        // from the spilled stream back to the unspilled stream as with
+        // [`Stream::try_unsharded_version`], because the types are different;
+        // we'd need an `Unspillable` trait.)
+        let bounds = self.trace_bounds::<B::Key, B::Val>();
         let sharded = self.try_sharded_version();
         let spilled = self
             .circuit()
             .cache_get_or_insert_with(SpillId::new(self.origin_node_id().clone()), || {
-                sharded.apply(|batch| batch_add_time(batch, &()))
+                let spilled = sharded.apply(|batch| batch_add_time(batch, &()));
+                self.circuit().cache_insert(
+                    BoundsId::new(spilled.origin_node_id().clone()),
+                    bounds.clone(),
+                );
+                spilled
             })
             .clone();
         spilled.mark_sharded_if(self);
@@ -268,7 +284,7 @@ where
     /// timestamp and adds it to a trace.
     pub fn trace(&self) -> Stream<C, FileValSpine<B, C>>
     where
-        B: IndexedZSet,
+        B: IndexedZSet + Send,
         <C as WithClock>::Time: DBTimestamp,
     {
         self.trace_with_bound(TraceBound::new(), TraceBound::new())
@@ -293,14 +309,14 @@ where
         lower_val_bound: TraceBound<B::Val>,
     ) -> Stream<C, FileValSpine<B, C>>
     where
-        B: IndexedZSet,
+        B: IndexedZSet + Send,
         <C as WithClock>::Time: DBTimestamp,
     {
-        let mut trace_bounds = self.circuit().cache_get_or_insert_with(
-            TraceId::new(self.origin_node_id().clone()),
-            || {
+        let bounds = self.trace_bounds_with_bound(lower_key_bound, lower_val_bound);
+
+        self.circuit()
+            .cache_get_or_insert_with(TraceId::new(self.origin_node_id().clone()), || {
                 let circuit = self.circuit();
-                let bounds = TraceBounds::new();
 
                 let persistent_id = format!(
                     "{}-{:?}",
@@ -333,17 +349,10 @@ where
 
                     circuit
                         .cache_insert(DelayedTraceId::new(trace.origin_node_id().clone()), local);
-                    (trace, bounds)
+                    trace
                 })
-            },
-        );
-
-        let (trace, bounds) = trace_bounds.deref_mut();
-
-        bounds.add_key_bound(lower_key_bound);
-        bounds.add_val_bound(lower_val_bound);
-
-        trace.clone()
+            })
+            .clone()
     }
 
     /// Like `integrate_trace`, but additionally applies a retainment policy to
@@ -448,15 +457,17 @@ where
         &self,
         bounds_stream: &Stream<C, TS>,
         retain_key_func: RK,
-    ) -> Stream<C, Spine<<B as SpillableBatch>::Spilled>>
-    where
-        B: Batch<Time = ()> + SpillableBatch + Send,
+    ) where
+        B: Batch<Time = ()>,
         TS: DBData,
         RK: Fn(&B::Key, &TS) -> bool + Clone + 'static,
     {
-        self.shard()
-            .spill()
-            .integrate_trace_retain_keys_in_memory(bounds_stream, retain_key_func)
+        let bounds = self.trace_bounds::<_, B::Val>();
+        bounds_stream.inspect(move |ts| {
+            let ts = ts.clone();
+            let retain_key_func = retain_key_func.clone();
+            bounds.set_key_filter(Box::new(move |key| retain_key_func(key, &ts)));
+        });
     }
 
     /// Similar to
@@ -467,137 +478,128 @@ where
         &self,
         bounds_stream: &Stream<C, TS>,
         retain_value: RV,
-    ) -> Stream<C, Spine<<B as SpillableBatch>::Spilled>>
-    where
-        B: Batch<Time = ()> + SpillableBatch + Send,
-        TS: DBData,
-        RV: Fn(&B::Val, &TS) -> bool + Clone + 'static,
-    {
-        self.shard()
-            .spill()
-            .integrate_trace_retain_values_in_memory(bounds_stream, retain_value)
-    }
-
-    /// Like [`integrate_trace_retain_keys`](Self::integrate_trace_retain_keys),
-    /// but keeps the trace in memory rather than spilling it to storage.  This
-    /// is appropriate for traces that are known to remain small.
-    #[track_caller]
-    pub fn integrate_trace_retain_keys_in_memory<TS, RK>(
-        &self,
-        bounds_stream: &Stream<C, TS>,
-        retain_key_func: RK,
-    ) -> Stream<C, Spine<B>>
-    where
-        B: Batch<Time = ()>,
-        TS: DBData,
-        RK: Fn(&B::Key, &TS) -> bool + Clone + 'static,
-    {
-        let (trace, bounds) = self.integrate_trace_inner();
-
-        bounds_stream.inspect(move |ts| {
-            let ts = ts.clone();
-            let retain_key_func = retain_key_func.clone();
-            bounds.set_key_filter(Box::new(move |key| retain_key_func(key, &ts)));
-        });
-
-        trace
-    }
-
-    /// Like
-    /// [`integrate_trace_retain_values`](Self::integrate_trace_retain_values),
-    /// but keeps the trace in memory rather than spilling it to storage.  This
-    /// is appropriate for traces that are known to remain small.
-    #[track_caller]
-    pub fn integrate_trace_retain_values_in_memory<TS, RV>(
-        &self,
-        bounds_stream: &Stream<C, TS>,
-        retain_value: RV,
-    ) -> Stream<C, Spine<B>>
-    where
+    ) where
         B: Batch<Time = ()>,
         TS: DBData,
         RV: Fn(&B::Val, &TS) -> bool + Clone + 'static,
     {
-        let (trace, bounds) = self.integrate_trace_inner();
-
+        let bounds = self.trace_bounds::<B::Key, _>();
         bounds_stream.inspect(move |ts| {
             let ts = ts.clone();
             let retain_value = retain_value.clone();
-            bounds.set_val_filter(Box::new(move |val| retain_value(val, &ts)));
+            bounds.set_val_filter(Box::new(move |value| retain_value(value, &ts)));
         });
-
-        trace
     }
 
-    /// Like [`integrate_trace`](Self::integrate_trace), but keeps the trace in
-    /// memory rather than spilling it to storage.  This is appropriate for
-    /// traces that are known to remain small.
-    #[track_caller]
-    pub fn integrate_trace_in_memory(&self) -> Stream<C, Spine<B>>
+    /// Retrieves trace bounds for `self`, creating them if necessary.
+    ///
+    /// It's important that a single `TraceBounds` includes all of the bounds
+    /// relevant to a particular trace.  This can be tricky in the presence of
+    /// multiple versions of a stream that code tends to treat as the same.  We
+    /// manage it by mapping all of those versions to just one single version:
+    ///
+    /// * For a sharded version of some source stream, we use the source stream.
+    ///
+    /// * For a spilled version of some source stream, we use the source stream.
+    ///
+    /// Using the source stream is a safer choice than using the sharded (or
+    /// spilled) version, because it always exists, whereas the sharded version
+    /// might be created only *after* we get the trace bounds for the source
+    /// stream.
+    fn trace_bounds<K, V>(&self) -> TraceBounds<K, V>
     where
-        B: Batch<Time = ()>,
-        Spine<B>: SizeOf,
+        K: DBData,
+        V: DBData,
     {
-        self.integrate_trace_with_bound_in_memory(TraceBound::new(), TraceBound::new())
+        // We handle moving from the sharded to unsharded stream directly here.
+        // Moving from spilled to unspilled is handled by `spill()`.
+        self.circuit()
+            .cache_get_or_insert_with(
+                BoundsId::new(self.try_unsharded_version().origin_node_id().clone()),
+                TraceBounds::new,
+            )
+            .clone()
     }
 
-    #[track_caller]
-    pub fn integrate_trace(&self) -> Stream<C, Spine<<B as SpillableBatch>::Spilled>>
-    where
-        B: Batch<Time = ()> + SpillableBatch,
-        Spine<<B as SpillableBatch>::Spilled>: SizeOf,
-    {
-        self.spill().integrate_trace_in_memory()
-    }
-
-    pub fn integrate_trace_with_bound_in_memory(
+    /// Retrieves trace bounds for `self`, or a sharded version of `self` if it
+    /// exists, creating them if necessary, and adds bounds for
+    /// `lower_key_bound` and `lower_val_bound`.
+    fn trace_bounds_with_bound<K, V>(
         &self,
-        lower_key_bound: TraceBound<B::Key>,
-        lower_val_bound: TraceBound<B::Val>,
-    ) -> Stream<C, Spine<B>>
+        lower_key_bound: TraceBound<K>,
+        lower_val_bound: TraceBound<V>,
+    ) -> TraceBounds<K, V>
     where
-        B: Batch<Time = ()>,
-        Spine<B>: SizeOf,
+        K: DBData,
+        V: DBData,
     {
-        let (trace, bounds) = self.integrate_trace_inner();
-
+        let bounds = self.trace_bounds();
         bounds.add_key_bound(lower_key_bound);
         bounds.add_val_bound(lower_val_bound);
-
-        trace
+        bounds
     }
 
+    /// Constructs and returns a untimed trace of this stream.
+    ///
+    /// The trace is unbounded, meaning that data will not be discarded because
+    /// it has a low key or value.  Filter functions set with
+    /// [`integrate_trace_retain_keys`](Self::integrate_trace_retain_keys) or
+    /// [`integrate_trace_retain_values`](Self::integrate_trace_retain_values)
+    /// can still discard data.
+    ///
+    /// By default, the trace is in-memory, but most traces can become large, so
+    /// it's a good idea to maintain it in storage by calling
+    /// [`spill`](Self::spill) before integrating.
+    #[track_caller]
+    pub fn integrate_trace(&self) -> Stream<C, Spine<B>>
+    where
+        B: Batch<Time = ()>,
+        Spine<B>: SizeOf,
+    {
+        self.integrate_trace_with_bound(TraceBound::new(), TraceBound::new())
+    }
+
+    /// Constructs and returns a untimed trace of this stream.
+    ///
+    /// Data in the trace with a key less than `lower_key_bound` or value less
+    /// than `lower_val_bound` can be discarded, although these bounds can be
+    /// lowered later (discarding less data).  Filter functions set with
+    /// [`integrate_trace_retain_keys`](Self::integrate_trace_retain_keys) or
+    /// [`integrate_trace_retain_values`](Self::integrate_trace_retain_values)
+    /// can still discard data.
+    ///
+    /// By default, the trace is in-memory, but most traces can become large, so
+    /// it's a good idea to maintain it in storage by calling
+    /// [`spill`](Self::spill) before integrating.
     pub fn integrate_trace_with_bound(
         &self,
         lower_key_bound: TraceBound<B::Key>,
         lower_val_bound: TraceBound<B::Val>,
-    ) -> Stream<C, Spine<<B as SpillableBatch>::Spilled>>
-    where
-        B: Batch<Time = ()> + SpillableBatch,
-        Spine<B>: SizeOf,
-    {
-        self.spill()
-            .integrate_trace_with_bound_in_memory(lower_key_bound, lower_val_bound)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn integrate_trace_inner(&self) -> (Stream<C, Spine<B>>, TraceBounds<B::Key, B::Val>)
+    ) -> Stream<C, Spine<B>>
     where
         B: Batch<Time = ()>,
         Spine<B>: SizeOf,
     {
-        let mut trace_bounds = self.circuit().cache_get_or_insert_with(
-            TraceId::new(self.origin_node_id().clone()),
-            || {
-                let circuit = self.circuit();
-                let bounds = TraceBounds::new();
+        self.integrate_trace_inner(self.trace_bounds_with_bound(lower_key_bound, lower_val_bound))
+    }
 
+    #[allow(clippy::type_complexity)]
+    fn integrate_trace_inner(&self, bounds: TraceBounds<B::Key, B::Val>) -> Stream<C, Spine<B>>
+    where
+        B: Batch<Time = ()>,
+        Spine<B>: SizeOf,
+    {
+        self.circuit()
+            .cache_get_or_insert_with(TraceId::new(self.origin_node_id().clone()), || {
+                let circuit = self.circuit();
+
+                let bounds = bounds.clone();
                 circuit.region("integrate_trace", || {
                     let (ExportStream { local, export }, z1feedback) = circuit
                         .add_feedback_with_export(Z1Trace::new(
                             true,
                             circuit.root_scope(),
-                            bounds.clone(),
+                            bounds,
                             self.origin_node_id().persistent_id(),
                         ));
 
@@ -624,14 +626,10 @@ where
                         .cache_insert(DelayedTraceId::new(trace.origin_node_id().clone()), local);
                     circuit.cache_insert(ExportId::new(trace.origin_node_id().clone()), export);
 
-                    (trace, bounds)
+                    trace
                 })
-            },
-        );
-
-        let (trace, bounds) = trace_bounds.deref_mut();
-
-        (trace.clone(), bounds.clone())
+            })
+            .clone()
     }
 }
 
@@ -682,9 +680,10 @@ where
             self.delayed_trace.clone(),
         );
         circuit.cache_insert(
-            TraceId::new(stream.origin_node_id().clone()),
-            (trace.clone(), self.bounds.clone()),
+            BoundsId::new(stream.origin_node_id().clone()),
+            self.bounds.clone(),
         );
+        circuit.cache_insert(TraceId::new(stream.origin_node_id().clone()), trace.clone());
         circuit.cache_insert(
             ExportId::new(trace.origin_node_id().clone()),
             self.export_trace,
@@ -1103,19 +1102,19 @@ mod test {
                         },
                     );
 
-                let _trace = stream.integrate_trace();
-                let retain_keys = stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
-                retain_keys.apply(|trace| {
+                let trace = stream.spill().integrate_trace();
+                stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
+                trace.apply(|trace| {
                     //println!("retain_keys: {}bytes", trace.size_of().total_bytes());
                     assert!(trace.size_of().total_bytes() < 15000);
                 });
 
                 let stream2 = stream.map_index(|(k, v)| (*k, *v)).shard();
 
-                let _trace2 = stream2.integrate_trace();
-                let retain_vals = stream2.integrate_trace_retain_values(&watermark, |val, ts| *val >= ts.1 - 1000);
+                let trace2 = stream2.spill().integrate_trace();
+                stream2.integrate_trace_retain_values(&watermark, |val, ts| *val >= ts.1 - 1000);
 
-                retain_vals.apply(|trace| {
+                trace2.apply(|trace| {
                     //println!("retain_vals: {}bytes", trace.size_of().total_bytes());
                     assert!(trace.size_of().total_bytes() < 15000);
                 });
