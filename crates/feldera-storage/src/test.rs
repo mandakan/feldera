@@ -12,7 +12,7 @@ pub(crate) fn init_test_logger() {
             writeln!(
                 buf,
                 "{t} {} {}",
-                buf.default_styled_level(record.level()),
+                buf.default_level_style(record.level()),
                 record.args()
             )
         })

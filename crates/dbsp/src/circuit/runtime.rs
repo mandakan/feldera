@@ -7,6 +7,7 @@ use crossbeam::channel::bounded;
 use crossbeam_utils::sync::{Parker, Unparker};
 use feldera_storage::buffer_cache::BufferCache;
 use feldera_storage::file::cache::FileCacheEntry;
+use feldera_storage::dirlock::LockedDirectory;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::path::Path;
@@ -201,17 +202,17 @@ impl Drop for RuntimeInner {
 }
 
 /// The location where the runtime stores its data.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum StorageLocation {
     Temporary(PathBuf),
-    Permanent(PathBuf),
+    Permanent(LockedDirectory),
 }
 
 impl AsRef<Path> for StorageLocation {
     fn as_ref(&self) -> &Path {
         match self {
             Self::Temporary(path) => path.as_ref(),
-            Self::Permanent(path) => path.as_ref(),
+            Self::Permanent(path) => path.base(),
         }
     }
 }
@@ -220,7 +221,7 @@ impl From<StorageLocation> for PathBuf {
     fn from(location: StorageLocation) -> PathBuf {
         match location {
             StorageLocation::Temporary(path) => path,
-            StorageLocation::Permanent(path) => path,
+            StorageLocation::Permanent(path) => path.base().into(),
         }
     }
 }
@@ -245,7 +246,11 @@ impl RuntimeInner {
             // Note that we use into_path() here which avoids deleting the temporary directory
             // we still clean it up when the runtime is dropped -- but keep it around on panic.
             || StorageLocation::Temporary(tempfile::tempdir().unwrap().into_path()),
-            |s| StorageLocation::Permanent(PathBuf::from(s)),
+            |s| {
+                StorageLocation::Permanent(LockedDirectory::new(s).expect(
+                    "Failed to create pidfile for storage directory, is it already in use?",
+                ))
+            },
         );
 
         Self {
@@ -421,7 +426,7 @@ impl Runtime {
             pub static DEFAULT_BACKEND: Rc<StorageBackend> = {
                 let rt = Runtime::runtime();
                 let io_backend = if let Some(rt) = rt {
-                    feldera_storage::backend::DefaultBackend::with_base(rt.inner().storage.clone())
+                    feldera_storage::backend::DefaultBackend::with_base(&rt.inner().storage)
                 } else {
                     // This else case exists because some nexmark tests run without a runtime :/
                     feldera_storage::backend::DefaultBackend::with_base(TEMPDIR.with(|dir| dir.path().to_path_buf()))
@@ -479,7 +484,7 @@ impl Runtime {
 
     /// Returns the path to the storage directory for this runtime.
     pub fn storage_path(&self) -> PathBuf {
-        self.inner().storage.clone().into()
+        self.inner().storage.as_ref().into()
     }
 
     /// A per-worker sequential counter.
@@ -685,6 +690,7 @@ mod tests {
         hruntime.join().unwrap();
         assert!(path.exists(), "persistent storage is not cleaned up");
     }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn storage_temp_cleanup() {
