@@ -14,10 +14,11 @@ use crate::{
     },
     DBData, DBWeight, NumEntries,
 };
+use feldera_storage::file::reader::Error as ReaderError;
 use rand::Rng;
 use rkyv::{Archive, Deserialize, Serialize};
 use size_of::SizeOf;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
     cmp::max,
     fmt::{self, Debug, Display},
@@ -325,6 +326,11 @@ where
     fn persistent_id(&self) -> Option<PathBuf> {
         Some(self.layer.path())
     }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
+        let layer = FileColumnLayer::from_path(path, 0)?;
+        Ok(Self { layer })
+    }
 }
 
 /// State for an in-progress merge.
@@ -589,8 +595,8 @@ where
     R: DBWeight,
 {
     type ValueConsumer<'a> = FileZSetValueConsumer<R>
-    where
-        Self: 'a;
+        where
+            Self: 'a;
 
     fn key_valid(&self) -> bool {
         self.consumer.key_valid()

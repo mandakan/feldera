@@ -8,12 +8,12 @@ use std::{
     marker::PhantomData,
     mem::size_of,
     ops::{Bound, Range, RangeBounds},
-    path::PathBuf,
+    path::{Path as IoPath, PathBuf},
     rc::Rc,
 };
 
 use binrw::{
-    io::{self, Error as IoError},
+    io::{self},
     BinRead, Error as BinError,
 };
 use rkyv::{archived_value, Deserialize, Infallible};
@@ -44,10 +44,6 @@ pub enum Error {
     #[error("Error accessing storage: {0}")]
     Storage(#[from] StorageError),
 
-    /// Errors reading the layer file.
-    #[error("Error accessing storage: {0}")]
-    Io(#[from] IoError),
-
     /// File has unexpected number of columns.
     #[error("File has {actual} column(s) but should have {expected}.")]
     WrongNumberOfColumns {
@@ -56,6 +52,10 @@ pub enum Error {
         /// Expected number of columns in file.
         expected: usize,
     },
+
+    /// The invocation is not supported.
+    #[error("The requested operation is not supported.")]
+    Unsupported,
 }
 
 impl From<BinError> for Error {
@@ -194,7 +194,7 @@ pub enum CorruptionError {
     /// Each column must have at least at many rows as the previous, that is, we
     /// should have `prev_n_rows <= this_n_rows`.
     #[error(
-        "Column {column} has fewer rows ({this_n_rows}) than the previous column ({prev_n_rows})."
+    "Column {column} has fewer rows ({this_n_rows}) than the previous column ({prev_n_rows})."
     )]
     DecreasingRowCount {
         /// 0-based column index.
@@ -288,7 +288,7 @@ impl VarintReader {
                 count,
                 each: varint.len(),
             }
-            .into()),
+                .into()),
         }
     }
     fn new_opt(
@@ -337,7 +337,7 @@ impl StrideReader {
             stride,
             count,
         }
-        .into())
+            .into())
     }
     fn get(&self, index: usize) -> usize {
         debug_assert!(index < self.count);
@@ -415,8 +415,8 @@ impl InnerDataBlock {
     }
 
     fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Rc<Self>, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         file.cache.block_on(file.cache.read_data_block(
             file.file_handle.as_ref().unwrap(),
@@ -441,7 +441,7 @@ impl InnerDataBlock {
                 start,
                 end,
             }
-            .into())
+                .into())
         }
     }
 }
@@ -463,13 +463,13 @@ impl<K, A> Clone for DataBlock<K, A> {
 }
 
 impl<K, A> DataBlock<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         let inner = InnerDataBlock::new(file, node)?;
 
@@ -482,7 +482,7 @@ where
                 n_rows: inner.n_values() as u64,
                 expected_rows,
             }
-            .into());
+                .into());
         }
 
         Ok(Self {
@@ -539,8 +539,8 @@ where
         compare: &C,
         bias: Ordering,
     ) -> Option<usize>
-    where
-        C: Fn(&K) -> Ordering,
+        where
+            C: Fn(&K) -> Ordering,
     {
         let mut start = 0;
         let mut end = self.n_values();
@@ -571,8 +571,8 @@ where
 }
 
 fn range_compare<T>(range: &Range<T>, target: T) -> Ordering
-where
-    T: Ord,
+    where
+        T: Ord,
 {
     if target < range.start {
         Greater
@@ -593,10 +593,10 @@ struct TreeNode {
 
 impl TreeNode {
     fn read<S, K, A>(self, file: &ImmutableFileRef<S>) -> Result<TreeBlock<K, A>, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        K: Rkyv + Debug,
-        A: Rkyv,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            K: Rkyv + Debug,
+            A: Rkyv,
     {
         match self.node_type {
             NodeType::Data => Ok(TreeBlock::Data(DataBlock::new(file, &self)?)),
@@ -611,9 +611,9 @@ enum TreeBlock<K, A> {
 }
 
 impl<K, A> TreeBlock<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     fn lookup_row(&self, row: u64) -> Result<Option<TreeNode>, Error> {
         match self {
@@ -653,7 +653,7 @@ impl InnerIndexBlock {
                 size: location.size,
                 offset: location.offset,
             }
-            .into());
+                .into());
         }
 
         let row_totals = VarintReader::new(
@@ -672,7 +672,7 @@ impl InnerIndexBlock {
                     prev,
                     next,
                 }
-                .into());
+                    .into());
             }
         }
 
@@ -697,8 +697,8 @@ impl InnerIndexBlock {
     }
 
     fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Rc<Self>, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         file.cache.block_on(file.cache.read_index_block(
             file.file_handle.as_ref().unwrap(),
@@ -727,12 +727,12 @@ impl<K> Clone for IndexBlock<K> {
 }
 
 impl<K> IndexBlock<K>
-where
-    K: Rkyv,
+    where
+        K: Rkyv,
 {
     fn new<S>(file: &ImmutableFileRef<S>, node: &TreeNode) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         const MAX_DEPTH: usize = 64;
         if node.depth > MAX_DEPTH {
@@ -743,7 +743,7 @@ where
                 depth: node.depth,
                 max_depth: MAX_DEPTH,
             }
-            .into());
+                .into());
         }
 
         let inner = InnerIndexBlock::new(file, node)?;
@@ -757,7 +757,7 @@ where
                 n_rows,
                 expected_rows,
             }
-            .into());
+                .into());
         }
 
         Ok(Self {
@@ -847,8 +847,8 @@ where
         compare: &C,
         bias: Ordering,
     ) -> Option<usize>
-    where
-        C: Fn(&K) -> Ordering,
+        where
+            C: Fn(&K) -> Ordering,
     {
         let mut start = 0;
         let mut end = self.n_children() * 2;
@@ -885,8 +885,8 @@ where
 }
 
 impl<K> Debug for IndexBlock<K>
-where
-    K: Rkyv + Debug,
+    where
+        K: Rkyv + Debug,
 {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(
@@ -956,8 +956,8 @@ impl Column {
 /// Encapsulates storage and a file handle, and deletes the file handle when
 /// dropped.
 pub(crate) struct ImmutableFileRef<S>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     path: PathBuf,
     cache: Rc<BufferCache<S, FileCacheEntry>>,
@@ -965,8 +965,8 @@ where
 }
 
 impl<S> ImmutableFileRef<S>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     pub(crate) fn new(
         cache: &Rc<BufferCache<S, FileCacheEntry>>,
@@ -979,11 +979,16 @@ where
             file_handle: Some(file_handle),
         }
     }
+
+    fn open<P: AsRef<IoPath>>(cache: &Rc<BufferCache<S, FileCacheEntry>>, path: P) -> Result<Self, Error> {
+        let file_handle = cache.block_on(cache.open(&path))?;
+        Ok(Self::new(cache, file_handle, path.as_ref().to_path_buf()))
+    }
 }
 
 impl<S> Drop for ImmutableFileRef<S>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
         /*
@@ -995,8 +1000,8 @@ where
 }
 
 struct ReaderInner<S, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     file: Rc<ImmutableFileRef<S>>,
     /// Location of the file on disk.
@@ -1032,10 +1037,10 @@ impl ColumnSpec for () {
 }
 
 impl<K, A, N> ColumnSpec for (K, A, N)
-where
-    K: Rkyv,
-    A: Rkyv,
-    N: ColumnSpec,
+    where
+        K: Rkyv,
+        A: Rkyv,
+        N: ColumnSpec,
 {
     fn n_columns() -> usize {
         1 + N::n_columns()
@@ -1047,14 +1052,20 @@ where
 /// `T` in `Reader<S, T>` must be a [`ColumnSpec`] that specifies the key and
 /// auxiliary data types for all of the columns in the file to be read.
 pub struct Reader<S, T>(Rc<ReaderInner<S, T>>)
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor;
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor;
 
 impl<S, T> Reader<S, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        T: ColumnSpec,
 {
+    /// Instantiates a reader given an existing path.
+    pub fn open<P: AsRef<IoPath>>(cache: &Rc<BufferCache<S, FileCacheEntry>>, path: P) -> Result<Self, Error> {
+        let file = ImmutableFileRef::open(cache, path)?;
+        Self::new(Rc::new(file))
+    }
+
     /// Creates and returns a new `Reader` for `file`.
     pub(crate) fn new(file: Rc<ImmutableFileRef<S>>) -> Result<Self, Error> {
         let file_size = file
@@ -1071,7 +1082,7 @@ where
                 version: file_trailer.version,
                 expected_version: VERSION_NUMBER,
             }
-            .into());
+                .into());
         }
 
         let columns: Vec<_> = file_trailer
@@ -1097,7 +1108,7 @@ where
                     prev_n_rows,
                     this_n_rows,
                 }
-                .into());
+                    .into());
             }
         }
 
@@ -1113,8 +1124,8 @@ where
     /// This internally creates an empty temporary file, which means that it can
     /// fail with an I/O error.
     pub fn empty(cache: &Rc<BufferCache<S, FileCacheEntry>>) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         let file_handle = cache.block_on(cache.create())?;
         let (file_handle, path) = cache.block_on(cache.complete(file_handle))?;
@@ -1150,8 +1161,8 @@ where
 }
 
 impl<S, T> Clone for Reader<S, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -1159,11 +1170,11 @@ where
 }
 
 impl<S, K, A, N> Reader<S, (K, A, N)>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv,
-    (K, A, N): ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv,
+        (K, A, N): ColumnSpec,
 {
     /// Returns a [`RowGroup`] for all of the rows in column 0.
     pub fn rows(&self) -> RowGroup<S, K, A, N, (K, A, N)> {
@@ -1182,11 +1193,11 @@ where
 /// group in column 1, and then repeating as many times as necessary to get to
 /// the desired column.
 pub struct RowGroup<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     reader: &'a Reader<S, T>,
     column: usize,
@@ -1195,11 +1206,11 @@ where
 }
 
 impl<'a, S, K, A, N, T> Clone for RowGroup<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     fn clone(&self) -> Self {
         Self {
@@ -1212,11 +1223,11 @@ where
 }
 
 impl<'a, S, K, A, N, T> Debug for RowGroup<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "RowGroup(column={}, rows={:?})", self.column, self.rows)
@@ -1224,11 +1235,11 @@ where
 }
 
 impl<'a, S, K, A, N, T> RowGroup<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     fn new(reader: &'a Reader<S, T>, column: usize, rows: Range<u64>) -> Self {
         Self {
@@ -1273,8 +1284,8 @@ where
     /// Return a cursor for the first row in the row group, or just after the
     /// row group if it is empty.
     pub fn first(&self) -> Result<Cursor<'a, S, K, A, N, T>, Error>
-    where
-        S: StorageRead + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageControl + StorageExecutor,
     {
         let position = if self.is_empty() {
             Position::After
@@ -1287,8 +1298,8 @@ where
     /// Return a cursor for the last row in the row group, or just after the
     /// row group if it is empty.
     pub fn last(&self) -> Result<Cursor<'a, S, K, A, N, T>, Error>
-    where
-        S: StorageRead + StorageExecutor,
+        where
+            S: StorageRead + StorageExecutor,
     {
         let position = if self.is_empty() {
             Position::After
@@ -1302,8 +1313,8 @@ where
     /// cursor for that row; otherwise, returns a cursor for just after the row
     /// group.
     pub fn nth(&self, row: u64) -> Result<Cursor<'a, S, K, A, N, T>, Error>
-    where
-        S: StorageRead + StorageExecutor,
+        where
+            S: StorageRead + StorageExecutor,
     {
         let position = if row < self.len() {
             Position::for_row(self, self.rows.start + row)?
@@ -1315,8 +1326,8 @@ where
 
     /// Returns a row group for a subset of the rows in this one.
     pub fn subset<B>(&self, range: B) -> Self
-    where
-        B: RangeBounds<u64>,
+        where
+            B: RangeBounds<u64>,
     {
         let start = match range.start_bound() {
             Bound::Included(&index) => index,
@@ -1347,12 +1358,12 @@ pub trait FallibleEq {
 }
 
 impl<S, K, A, N> FallibleEq for Reader<S, (K, A, N)>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv,
-    (K, A, N): ColumnSpec,
-    for<'a> RowGroup<'a, S, K, A, N, (K, A, N)>: FallibleEq,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv,
+        (K, A, N): ColumnSpec,
+        for<'a> RowGroup<'a, S, K, A, N, (K, A, N)>: FallibleEq,
 {
     fn equals(&self, other: &Self) -> Result<bool, Error> {
         self.rows().equals(&other.rows())
@@ -1360,11 +1371,11 @@ where
 }
 
 impl<'a, S, K, A, T> FallibleEq for RowGroup<'a, S, K, A, (), T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug + Eq,
-    A: Rkyv + Eq,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug + Eq,
+        A: Rkyv + Eq,
+        T: ColumnSpec,
 {
     fn equals(&self, other: &Self) -> Result<bool, Error> {
         if self.len() != other.len() {
@@ -1384,14 +1395,14 @@ where
 }
 
 impl<'a, S, K, A, NK, NA, NN, T> FallibleEq for RowGroup<'a, S, K, A, (NK, NA, NN), T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Eq + Debug,
-    A: Rkyv + Eq,
-    NK: Rkyv + Eq + Debug,
-    NA: Rkyv + Eq,
-    T: ColumnSpec,
-    RowGroup<'a, S, NK, NA, NN, T>: FallibleEq,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Eq + Debug,
+        A: Rkyv + Eq,
+        NK: Rkyv + Eq + Debug,
+        NA: Rkyv + Eq,
+        T: ColumnSpec,
+        RowGroup<'a, S, NK, NA, NN, T>: FallibleEq,
 {
     fn equals(&self, other: &Self) -> Result<bool, Error> {
         if self.len() != other.len() {
@@ -1419,22 +1430,22 @@ where
 /// or before or after the row group.  (If the row group is empty, then the
 /// cursor can only be before or after the row group.)
 pub struct Cursor<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     row_group: RowGroup<'a, S, K, A, N, T>,
     position: Position<K, A>,
 }
 
 impl<'a, S, K, A, N, T> Clone for Cursor<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Clone,
-    A: Rkyv + Clone,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Clone,
+        A: Rkyv + Clone,
+        T: ColumnSpec,
 {
     fn clone(&self) -> Self {
         Self {
@@ -1445,11 +1456,11 @@ where
 }
 
 impl<'a, S, K, A, N, T> Debug for Cursor<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv + Debug,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv + Debug,
+        T: ColumnSpec,
 {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "Cursor({:?}, {:?})", self.row_group, self.position)
@@ -1457,11 +1468,11 @@ where
 }
 
 impl<'a, S, K, A, N, T> Cursor<'a, S, K, A, N, T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     /// Moves to the next row in the row group.  If the cursor was previously
     /// before the row group, it moves to the first row; if it was on the last
@@ -1580,8 +1591,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn seek_forward_until<P>(&mut self, predicate: P) -> Result<(), Error>
-    where
-        P: Fn(&K) -> bool + Clone,
+        where
+            P: Fn(&K) -> bool + Clone,
     {
         self.advance_to_first_ge(&|key| {
             if predicate(key) {
@@ -1600,8 +1611,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn advance_to_value_or_larger(&mut self, target: &K) -> Result<(), Error>
-    where
-        K: Ord,
+        where
+            K: Ord,
     {
         self.advance_to_first_ge(&|key| target.cmp(key))
     }
@@ -1617,8 +1628,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn advance_to_first_ge<C>(&mut self, compare: &C) -> Result<(), Error>
-    where
-        C: Fn(&K) -> Ordering,
+        where
+            C: Fn(&K) -> Ordering,
     {
         let position = Position::best_match::<S, N, T, _>(&self.row_group, compare, Less)?;
         if position > self.position {
@@ -1638,8 +1649,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn seek_backward_until<P>(&mut self, predicate: P) -> Result<(), Error>
-    where
-        P: Fn(&K) -> bool + Clone,
+        where
+            P: Fn(&K) -> bool + Clone,
     {
         self.rewind_to_last_le(&|key| {
             if !predicate(key) {
@@ -1658,8 +1669,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn rewind_to_value_or_smaller(&mut self, target: &K) -> Result<(), Error>
-    where
-        K: Ord,
+        where
+            K: Ord,
     {
         self.rewind_to_last_le(&|key| target.cmp(key))
     }
@@ -1676,8 +1687,8 @@ where
     ///
     /// Unsafe because `rkyv` deserialization is unsafe.
     pub unsafe fn rewind_to_last_le<C>(&mut self, compare: &C) -> Result<(), Error>
-    where
-        C: Fn(&K) -> Ordering,
+        where
+            C: Fn(&K) -> Ordering,
     {
         let position = Position::best_match::<S, N, T, _>(&self.row_group, compare, Greater)?;
         if position < self.position {
@@ -1688,13 +1699,13 @@ where
 }
 
 impl<'a, S, K, A, NK, NA, NN, T> Cursor<'a, S, K, A, (NK, NA, NN), T>
-where
-    S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K: Rkyv + Debug,
-    A: Rkyv,
-    NK: Rkyv + Debug,
-    NA: Rkyv,
-    T: ColumnSpec,
+    where
+        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K: Rkyv + Debug,
+        A: Rkyv,
+        NK: Rkyv + Debug,
+        NA: Rkyv,
+        T: ColumnSpec,
 {
     /// Obtains the row group in the next column associated with the current
     /// row.  If the cursor is on a row, the returned row group will contain at
@@ -1746,14 +1757,14 @@ impl<K, A> Clone for Path<K, A> {
 }
 
 impl<K, A> Path<K, A>
-where
-    K: Rkyv + Debug,
-    A: Rkyv,
+    where
+        K: Rkyv + Debug,
+        A: Rkyv,
 {
     fn for_row<S, N, T>(row_group: &RowGroup<'_, S, K, A, N, T>, row: u64) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         Self::for_row_from_ancestor(
             row_group.reader,
@@ -1771,8 +1782,8 @@ where
         mut node: TreeNode,
         row: u64,
     ) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         loop {
             let block = node.read(&reader.0.file)?;
@@ -1785,8 +1796,8 @@ where
         }
     }
     fn for_row_from_hint<S, T>(reader: &Reader<S, T>, hint: &Self, row: u64) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         if hint.data.rows().contains(&row) {
             return Ok(Self {
@@ -1819,8 +1830,8 @@ where
         self.data.row_group(self.row)
     }
     fn move_to_row<S, T>(&mut self, reader: &Reader<S, T>, row: u64) -> Result<(), Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
     {
         if self.data.rows().contains(&row) {
             self.row = row;
@@ -1834,10 +1845,10 @@ where
         compare: &C,
         bias: Ordering,
     ) -> Result<Option<Self>, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
-        C: Fn(&K) -> Ordering,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
+            C: Fn(&K) -> Ordering,
     {
         let mut indexes = Vec::new();
         let Some(mut node) = row_group.reader.0.columns[row_group.column].root.clone() else {
@@ -1848,9 +1859,9 @@ where
                 TreeBlock::Index(index_block) => {
                     let Some(child_idx) =
                         index_block.find_best_match(&row_group.rows, compare, bias)
-                    else {
-                        return Ok(None);
-                    };
+                        else {
+                            return Ok(None);
+                        };
                     node = index_block.get_child(child_idx)?;
                     indexes.push(index_block);
                 }
@@ -1869,9 +1880,9 @@ where
 }
 
 impl<K, A> Debug for Path<K, A>
-where
-    K: Rkyv + Debug,
-    A: Rkyv,
+    where
+        K: Rkyv + Debug,
+        A: Rkyv,
 {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "Path {{ row: {}, indexes:", self.row)?;
@@ -1906,9 +1917,9 @@ where
 
 #[derive(Clone, Debug)]
 enum Position<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     Before,
     Row(Path<K, A>),
@@ -1916,9 +1927,9 @@ where
 }
 
 impl<K, A> PartialEq for Position<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1931,16 +1942,15 @@ where
 }
 
 impl<K, A> Eq for Position<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
-{
-}
+    where
+        K: Rkyv,
+        A: Rkyv,
+{}
 
 impl<K, A> PartialOrd for Position<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -1948,9 +1958,9 @@ where
 }
 
 impl<K, A> Ord for Position<K, A>
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
@@ -1970,22 +1980,21 @@ where
 }
 
 impl<K, A> Position<K, A>
-where
-    K: Rkyv + Debug,
-    A: Rkyv,
+    where
+        K: Rkyv + Debug,
+        A: Rkyv,
 {
     fn for_row<S, N, T>(row_group: &RowGroup<'_, S, K, A, N, T>, row: u64) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         Ok(Self::Row(Path::for_row(row_group, row)?))
     }
     fn next<S, N, T>(&mut self, row_group: &RowGroup<'_, S, K, A, N, T>) -> Result<(), Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         let row = match self {
             Self::Before => row_group.rows.start,
@@ -2000,9 +2009,9 @@ where
         }
     }
     fn prev<S, N, T>(&mut self, row_group: &RowGroup<'_, S, K, A, N, T>) -> Result<(), Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         match self {
             Self::Before => (),
@@ -2028,10 +2037,9 @@ where
         row_group: &RowGroup<'_, S, K, A, N, T>,
         row: u64,
     ) -> Result<(), Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         if !row_group.rows.is_empty() {
             match self {
@@ -2073,11 +2081,10 @@ where
         compare: &C,
         bias: Ordering,
     ) -> Result<Self, Error>
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-
-        T: ColumnSpec,
-        C: Fn(&K) -> Ordering,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
+            C: Fn(&K) -> Ordering,
     {
         match Path::best_match(row_group, compare, bias)? {
             Some(path) => Ok(Position::Row(path)),
@@ -2089,9 +2096,9 @@ where
         }
     }
     fn absolute_position<S, N, T>(&self, row_group: &RowGroup<S, K, A, N, T>) -> u64
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         match self {
             Position::Before => row_group.rows.start,
@@ -2100,9 +2107,9 @@ where
         }
     }
     fn remaining_rows<S, N, T>(&self, row_group: &RowGroup<S, K, A, N, T>) -> u64
-    where
-        S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        T: ColumnSpec,
+        where
+            S: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            T: ColumnSpec,
     {
         match self {
             Position::Before => row_group.len(),

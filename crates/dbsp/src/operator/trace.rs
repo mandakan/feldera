@@ -944,7 +944,9 @@ where
 
         if scope == 0 && self.trace.is_none() {
             // TODO: use T::with_effort with configurable effort?
-            self.trace = Some(T::new(None, &self.persistent_id));
+            let rt = Runtime::runtime();
+            let cid = rt.map_or_else(|| 0, |rt| rt.start_checkpoint());
+            self.trace = Some(T::from_step_id(None, &self.persistent_id, cid));
         }
     }
 

@@ -148,6 +148,13 @@ pub trait StorageControl {
         self.create_named(&name).await
     }
 
+    /// Opens a file for reading.
+    ///
+    /// # Arguments
+    /// - `name` is the name of the file to open. It is relative to the base of
+    ///   the storage backend.
+    async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError>;
+
     /// Deletes a previously completed file.
     ///
     /// This removes the file from the storage backend and makes it unavailable

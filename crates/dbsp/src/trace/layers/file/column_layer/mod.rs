@@ -2,13 +2,13 @@ mod builders;
 mod consumer;
 pub(crate) mod cursor;
 
-use feldera_storage::file::reader::{FallibleEq, Reader};
+use feldera_storage::file::reader::{Error as ReaderError, FallibleEq, Reader};
 use rand::{seq::index::sample, Rng};
 use rkyv::ser::Serializer;
 use rkyv::{Archive, Archived, Deserialize, Fallible, Serialize};
 use size_of::SizeOf;
 use std::ops::AddAssign;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
     cmp::min,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
@@ -48,6 +48,11 @@ where
             file: Reader::empty(&Runtime::storage()).unwrap(),
             lower_bound: 0,
         }
+    }
+
+    pub fn from_path<P: AsRef<Path>>(path: P, lower_bound: usize) -> Result<Self, ReaderError> {
+        let file = Reader::open(&Runtime::storage(), path)?;
+        Ok(Self { file, lower_bound })
     }
 
     pub fn sample_keys<RG>(&self, rng: &mut RG, sample_size: usize, output: &mut Vec<K>)

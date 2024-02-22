@@ -72,8 +72,8 @@ impl From<(&ImmutableFileHandle, u64)> for CacheKey {
 
 /// A value in the block cache.
 struct CacheValue<E>
-where
-    E: CacheEntry,
+    where
+        E: CacheEntry,
 {
     /// Cached interpretation of `block`.
     aux: E,
@@ -84,8 +84,8 @@ where
 }
 
 pub trait CacheEntry: Clone
-where
-    Self: Sized,
+    where
+        Self: Sized,
 {
     fn cost(&self) -> usize;
     fn from_read(raw: Rc<FBuf>, offset: u64, size: usize) -> Result<Self, Error>;
@@ -93,8 +93,8 @@ where
 }
 
 struct CacheInner<E>
-where
-    E: CacheEntry,
+    where
+        E: CacheEntry,
 {
     /// Cache contents.
     cache: BTreeMap<CacheKey, CacheValue<E>>,
@@ -114,8 +114,8 @@ where
 }
 
 impl<E> CacheInner<E>
-where
-    E: CacheEntry,
+    where
+        E: CacheEntry,
 {
     fn new() -> Self {
         Self {
@@ -207,18 +207,18 @@ where
 
 /// A cache on top of a storage [backend](crate::backend).
 pub struct BufferCache<B, E>
-where
-    B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    E: CacheEntry,
+    where
+        B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        E: CacheEntry,
 {
     backend: Rc<B>,
     inner: RefCell<CacheInner<E>>,
 }
 
 impl<B, E> BufferCache<B, E>
-where
-    B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    E: CacheEntry,
+    where
+        B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        E: CacheEntry,
 {
     /// Creates a new cache on top of `backend`.
     ///
@@ -240,8 +240,8 @@ where
         size: usize,
         convert: F,
     ) -> Result<T, Error>
-    where
-        F: Fn(&E) -> Result<T, ()>,
+        where
+            F: Fn(&E) -> Result<T, ()>,
     {
         let key = CacheKey::from((fd, offset));
         if let Some(aux) = self.inner.borrow_mut().get(key) {
@@ -291,20 +291,24 @@ where
 }
 
 impl<B, E> StorageControl for BufferCache<B, E>
-where
-    B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    E: CacheEntry,
+    where
+        B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        E: CacheEntry,
 {
+    async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
+        self.backend.create_named(name).await
+    }
     async fn create(&self) -> Result<FileHandle, StorageError> {
         self.backend.create().await
     }
-    async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
-        self.backend.create_named(name).await
+    async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError> {
+        self.backend.open(name).await
     }
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.inner.borrow_mut().delete_file((&fd).into());
         self.backend.delete(fd).await
     }
+
     async fn delete_mut(&self, fd: FileHandle) -> Result<(), StorageError> {
         self.inner.borrow_mut().delete_file((&fd).into());
         self.backend.delete_mut(fd).await
@@ -312,13 +316,13 @@ where
 }
 
 impl<B, E> StorageExecutor for BufferCache<B, E>
-where
-    B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    E: CacheEntry,
+    where
+        B: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        E: CacheEntry,
 {
     fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future,
+        where
+            F: Future,
     {
         self.backend.block_on(future)
     }

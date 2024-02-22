@@ -44,6 +44,7 @@ pub mod spine_fueled;
 
 pub use cursor::{Consumer, Cursor, ValueConsumer};
 use feldera_storage::buffer_cache::FBuf;
+use feldera_storage::file::reader::Error as ReaderError;
 pub use feldera_storage::file::{Deserializable, Deserializer, Rkyv, Serializer};
 
 #[cfg(feature = "persistence")]
@@ -63,7 +64,7 @@ use crate::{
 use rand::Rng;
 use rkyv::{archived_root, Archive, Archived, Deserialize, Infallible, Serialize};
 use size_of::SizeOf;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fmt::Debug, hash::Hash};
 
 /// Trait for data stored in batches.
@@ -196,6 +197,14 @@ pub trait Trace: BatchReader {
 
     /// Allocates a new empty trace.
     fn new<S: AsRef<str>>(activator: Option<Activator>, persistent_id: S) -> Self;
+
+    /// Allocates a new trace and initialize it with batches found for the given
+    /// step-id.
+    fn from_step_id<S: AsRef<str>>(
+        activator: Option<Activator>,
+        persistent_id: S,
+        sid: u64,
+    ) -> Self;
 
     /// Pushes all timestamps in the trace back to `frontier` or less, by
     /// replacing each timestamp `t` in the trace by `t.meet(frontier)`.  This
@@ -452,6 +461,10 @@ where
 
     fn persistent_id(&self) -> Option<PathBuf> {
         None
+    }
+
+    fn from_path<P: AsRef<Path>>(_path: P) -> Result<Self, ReaderError> {
+        Err(ReaderError::Unsupported)
     }
 }
 

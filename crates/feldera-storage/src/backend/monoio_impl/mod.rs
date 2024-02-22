@@ -6,6 +6,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -128,7 +129,6 @@ impl MonoioBackend {
 impl StorageControl for MonoioBackend {
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
         let path = self.base.join(name);
-        eprintln!("Creating file: {:?}", path);
         let file = open_as_direct(
             &path,
             OpenOptions::new().create_new(true).write(true).read(true),
@@ -148,6 +148,27 @@ impl StorageControl for MonoioBackend {
         counter!(FILES_CREATED).increment(1);
 
         Ok(FileHandle(file_counter))
+    }
+
+    /// Opens a file for reading.
+    async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError> {
+        let path = self.base.join(name);
+        let attr = std::fs::metadata(&path)?;
+
+        let file = open_as_direct(&path, OpenOptions::new().read(true)).await?;
+        let mut files = self.files.write().await;
+
+        let file_counter = self.next_file_id.increment();
+        files.insert(
+            file_counter,
+            FileMetaData {
+                file,
+                path,
+                size: RefCell::new(attr.size()),
+            },
+        );
+
+        Ok(ImmutableFileHandle(file_counter))
     }
 
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {

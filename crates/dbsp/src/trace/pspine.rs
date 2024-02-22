@@ -679,7 +679,17 @@ where
     type Batch = B;
 
     fn new<S: AsRef<str>>(activator: Option<Activator>, persistent_id: S) -> Self {
-        Self::with_effort(1, activator, String::from(persistent_id.as_ref()))
+        Self::with_effort(1, activator, String::from(persistent_id.as_ref()), 0)
+    }
+
+    fn from_step_id<S: AsRef<str>>(
+        activator: Option<Activator>,
+        persistent_id: S,
+        sid: u64,
+    ) -> Self {
+        assert_eq!(sid, 0, "This type should! support checkpoints");
+        let spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()), sid);
+        spine
     }
 
     fn recede_to(&mut self, frontier: &B::Time) {
@@ -917,10 +927,15 @@ where
         mut effort: usize,
         activator: Option<Activator>,
         persistent_id: String,
+        sid: u64,
     ) -> Self {
         // Zero effort is .. not smart.
         if effort == 0 {
             effort = 1;
+        }
+
+        if sid > 0 {
+            todo!("do things")
         }
 
         Spine {

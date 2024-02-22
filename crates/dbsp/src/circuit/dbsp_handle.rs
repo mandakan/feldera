@@ -211,6 +211,7 @@ impl StdError for LayoutError {}
 pub struct CircuitConfig {
     pub layout: Layout,
     pub storage: Option<String>,
+    pub init_checkpoint: u64,
 }
 
 impl CircuitConfig {
@@ -218,6 +219,7 @@ impl CircuitConfig {
         Self {
             layout: Layout::new_solo(n),
             storage: None,
+            init_checkpoint: 0,
         }
     }
 }
@@ -230,6 +232,10 @@ impl IntoCircuitConfig for CircuitConfig {
     fn storage(&self) -> Option<String> {
         self.storage.clone()
     }
+
+    fn start_checkpoint(&self) -> u64 {
+        self.init_checkpoint
+    }
 }
 
 /// Convenience trait that allows specifying a [`Layout`] as a `usize` for a
@@ -239,6 +245,10 @@ pub trait IntoCircuitConfig {
 
     fn storage(&self) -> Option<String> {
         None
+    }
+
+    fn start_checkpoint(&self) -> u64 {
+        0
     }
 }
 
@@ -875,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_commit() {
-        use crate::{operator::FilterMap, utils::Tup2, Runtime, Stream};
+        use crate::{utils::Tup2, Runtime, Stream};
         use size_of::SizeOf;
         use std::cmp::max;
 

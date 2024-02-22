@@ -1,13 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
     marker::PhantomData,
 };
 
-use feldera_storage::file::{
-    reader::{ColumnSpec, Cursor as FileCursor, Reader},
-    writer::{Parameters, Writer2},
+use feldera_storage::{
+    backend::{StorageControl, StorageExecutor, StorageRead},
+    file::{
+        reader::{ColumnSpec, Cursor as FileCursor, Error as ReaderError, Reader},
+        writer::{Parameters, Writer2},
+    },
 };
 use itertools::Itertools;
 use rand::{seq::index::sample, Rng};
@@ -29,20 +32,20 @@ use super::StorageBackend;
 type RawValBatch<K, V, T, R> = Reader<StorageBackend, (K, (), (V, Vec<(T, R)>, ()))>;
 
 type RawKeyCursor<'s, K, V, T, R> =
-    FileCursor<'s, StorageBackend, K, (), (V, Vec<(T, R)>, ()), (K, (), (V, Vec<(T, R)>, ()))>;
+FileCursor<'s, StorageBackend, K, (), (V, Vec<(T, R)>, ()), (K, (), (V, Vec<(T, R)>, ()))>;
 
 type RawValCursor<'s, K, V, T, R> =
-    FileCursor<'s, StorageBackend, V, Vec<(T, R)>, (), (K, (), (V, Vec<(T, R)>, ()))>;
+FileCursor<'s, StorageBackend, V, Vec<(T, R)>, (), (K, (), (V, Vec<(T, R)>, ()))>;
 
 /// An immutable collection of update tuples, from a contiguous interval of
 /// logical times.
 #[derive(Clone)]
 pub struct FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     pub file: RawValBatch<K, V, T, R>,
     pub lower_bound: usize,
@@ -51,11 +54,11 @@ where
 }
 
 impl<K, V, T, R> NumEntries for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     const CONST_NUM_ENTRIES: Option<usize> = None;
 
@@ -71,11 +74,11 @@ where
 }
 
 impl<K, V, T, R> Display for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         writeln!(f, "lower: {:?}, upper: {:?}\n", self.lower, self.upper)
@@ -83,11 +86,11 @@ where
 }
 
 impl<K, V, T, R> BatchReader for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     type Key = K;
     type Val = V;
@@ -132,8 +135,8 @@ where
     }
 
     fn sample_keys<RG>(&self, rng: &mut RG, sample_size: usize, output: &mut Vec<Self::Key>)
-    where
-        RG: Rng,
+        where
+            RG: Rng,
     {
         let size = self.key_count();
         let mut cursor = self.file.rows().first().unwrap();
@@ -157,11 +160,11 @@ where
 }
 
 impl<K, V, T, R> Batch for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     type Item = (K, V);
     type Batcher = MergeBatcher<(K, V), T, R, Self>;
@@ -173,8 +176,8 @@ where
     }
 
     fn from_keys(time: Self::Time, keys: Vec<(Self::Key, Self::R)>) -> Self
-    where
-        Self::Val: From<()>,
+        where
+            Self::Val: From<()>,
     {
         Self::from_tuples(
             time,
@@ -219,12 +222,22 @@ where
     fn persistent_id(&self) -> Option<PathBuf> {
         Some(self.file.path())
     }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
+        let file = RawValBatch::open(&Runtime::storage(), path)?;
+        Ok(Self {
+            file,
+            lower_bound: 0,
+            lower: Antichain::new(),
+            upper: Antichain::new(),
+        })
+    }
 }
 
 fn recede_times<T, R>(mut td: Vec<(T, R)>, frontier: &T) -> Vec<(T, R)>
-where
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        T: DBTimestamp,
+        R: DBWeight,
 {
     for (time, _diff) in &mut td {
         time.meet_assign(frontier);
@@ -250,11 +263,11 @@ where
 
 /// State for an in-progress merge.
 pub struct FileValMerger<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     result: Option<RawValBatch<K, V, T, R>>,
     lower: Antichain<T>,
@@ -272,10 +285,10 @@ fn read_filtered<K, A, N, T>(
     cursor: &mut FileCursor<StorageBackend, K, A, N, T>,
     filter: &Option<Filter<K>>,
 ) -> Option<K>
-where
-    K: Rkyv + Debug,
-    A: Rkyv,
-    T: ColumnSpec,
+    where
+        K: Rkyv + Debug,
+        A: Rkyv,
+        T: ColumnSpec,
 {
     while cursor.has_value() {
         let key = unsafe { cursor.key() }.unwrap();
@@ -288,9 +301,9 @@ where
 }
 
 fn merge_times<T, R>(mut a: &[(T, R)], mut b: &[(T, R)]) -> Vec<(T, R)>
-where
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        T: DBTimestamp,
+        R: DBWeight,
 {
     let mut output = Vec::with_capacity(a.len() + b.len());
     while !a.is_empty() && !b.is_empty() {
@@ -320,11 +333,11 @@ where
 }
 
 impl<K, V, T, R> FileValMerger<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn copy_values_if(
         output: &mut Writer2<StorageBackend, K, (), V, Vec<(T, R)>>,
@@ -451,12 +464,12 @@ where
 }
 
 impl<K, V, T, R> Merger<K, V, T, R, FileValBatch<K, V, T, R>> for FileValMerger<K, V, T, R>
-where
-    Self: SizeOf,
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        Self: SizeOf,
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn new_merger(batch1: &FileValBatch<K, V, T, R>, batch2: &FileValBatch<K, V, T, R>) -> Self {
         Self {
@@ -494,11 +507,11 @@ where
 }
 
 impl<K, V, T, R> SizeOf for FileValMerger<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn size_of_children(&self, _context: &mut size_of::Context) {
         // XXX
@@ -507,11 +520,11 @@ where
 
 #[derive(Debug, SizeOf, Clone)]
 pub struct FileValCursor<'s, K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     key_cursor: RawKeyCursor<'s, K, V, T, R>,
     val_cursor: RawValCursor<'s, K, V, T, R>,
@@ -520,11 +533,11 @@ where
 }
 
 impl<'s, K, V, T, R> FileValCursor<'s, K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn new(batch: &'s FileValBatch<K, V, T, R>) -> Self {
         let key_cursor = batch
@@ -544,8 +557,8 @@ where
         }
     }
     fn move_key<F>(&mut self, op: F)
-    where
-        F: Fn(&mut RawKeyCursor<'s, K, V, T, R>),
+        where
+            F: Fn(&mut RawKeyCursor<'s, K, V, T, R>),
     {
         op(&mut self.key_cursor);
         self.val_cursor = self.key_cursor.next_column().unwrap().first().unwrap();
@@ -553,8 +566,8 @@ where
         self.val = unsafe { self.val_cursor.key() };
     }
     fn move_val<F>(&mut self, op: F)
-    where
-        F: Fn(&mut RawValCursor<'s, K, V, T, R>),
+        where
+            F: Fn(&mut RawValCursor<'s, K, V, T, R>),
     {
         op(&mut self.val_cursor);
         self.val = unsafe { self.val_cursor.key() };
@@ -565,11 +578,11 @@ where
 }
 
 impl<'s, K, V, T, R> Cursor<K, V, T, R> for FileValCursor<'s, K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn key(&self) -> &K {
         self.key.as_ref().unwrap()
@@ -580,8 +593,8 @@ where
     }
 
     fn fold_times<F, U>(&mut self, mut init: U, mut fold: F) -> U
-    where
-        F: FnMut(U, &T, &R) -> U,
+        where
+            F: FnMut(U, &T, &R) -> U,
     {
         for (time, diff) in self.times() {
             init = fold(init, &time, &diff);
@@ -590,8 +603,8 @@ where
     }
 
     fn fold_times_through<F, U>(&mut self, upper: &T, mut init: U, mut fold: F) -> U
-    where
-        F: FnMut(U, &T, &R) -> U,
+        where
+            F: FnMut(U, &T, &R) -> U,
     {
         for (time, diff) in self.times() {
             if time.less_equal(upper) {
@@ -602,8 +615,8 @@ where
     }
 
     fn weight(&mut self) -> R
-    where
-        T: PartialEq<()>,
+        where
+            T: PartialEq<()>,
     {
         debug_assert!(self.key_valid());
         debug_assert!(self.val_valid());
@@ -631,15 +644,15 @@ where
     }
 
     fn seek_key_with<P>(&mut self, predicate: P)
-    where
-        P: Fn(&K) -> bool + Clone,
+        where
+            P: Fn(&K) -> bool + Clone,
     {
         self.move_key(|key_cursor| unsafe { key_cursor.seek_forward_until(&predicate) }.unwrap());
     }
 
     fn seek_key_with_reverse<P>(&mut self, predicate: P)
-    where
-        P: Fn(&K) -> bool + Clone,
+        where
+            P: Fn(&K) -> bool + Clone,
     {
         self.move_key(|key_cursor| unsafe { key_cursor.seek_backward_until(&predicate) }.unwrap());
     }
@@ -654,8 +667,8 @@ where
         self.move_val(|val_cursor| unsafe { val_cursor.advance_to_value_or_larger(val) }.unwrap());
     }
     fn seek_val_with<P>(&mut self, predicate: P)
-    where
-        P: Fn(&V) -> bool + Clone,
+        where
+            P: Fn(&V) -> bool + Clone,
     {
         self.move_val(|val_cursor| unsafe { val_cursor.seek_forward_until(&predicate) }.unwrap());
     }
@@ -678,8 +691,8 @@ where
     }
 
     fn seek_val_with_reverse<P>(&mut self, predicate: P)
-    where
-        P: Fn(&V) -> bool + Clone,
+        where
+            P: Fn(&V) -> bool + Clone,
     {
         self.move_val(|val_cursor| unsafe { val_cursor.seek_backward_until(&predicate) }.unwrap());
     }
@@ -691,11 +704,11 @@ where
 
 /// A builder for creating layers from unsorted update tuples.
 pub struct FileValBuilder<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     time: T,
     writer: Writer2<StorageBackend, K, (), V, Vec<(T, R)>>,
@@ -703,12 +716,12 @@ where
 }
 
 impl<K, V, T, R> Builder<(K, V), T, R, FileValBatch<K, V, T, R>> for FileValBuilder<K, V, T, R>
-where
-    Self: SizeOf,
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        Self: SizeOf,
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn new_builder(time: T) -> Self {
         Self {
@@ -758,11 +771,11 @@ where
 }
 
 impl<K, V, T, R> SizeOf for FileValBuilder<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn size_of_children(&self, _context: &mut size_of::Context) {
         // XXX
@@ -791,8 +804,8 @@ impl<K, V, T, R> Consumer<K, V, R, T> for FileValConsumer<K, V, T, R> {
     }
 
     fn seek_key(&mut self, _key: &K)
-    where
-        K: Ord,
+        where
+            K: Ord,
     {
         todo!()
     }
@@ -817,11 +830,11 @@ impl<'a, K, V, T, R> ValueConsumer<'a, V, R, T> for FileValValueConsumer<'a, K, 
 }
 
 impl<K, V, T, R> SizeOf for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     fn size_of_children(&self, _context: &mut size_of::Context) {
         // XXX
@@ -829,11 +842,11 @@ where
 }
 
 impl<K, V, T, R> Archive for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
 {
     type Archived = ();
     type Resolver = ();
@@ -844,12 +857,12 @@ where
 }
 
 impl<K, V, T, R, S> Serialize<S> for FileValBatch<K, V, T, R>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
-    S: Serializer + ?Sized,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
+        S: Serializer + ?Sized,
 {
     fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         unimplemented!();
@@ -857,12 +870,12 @@ where
 }
 
 impl<K, V, T, R, D> Deserialize<FileValBatch<K, V, T, R>, D> for Archived<FileValBatch<K, V, T, R>>
-where
-    K: DBData,
-    V: DBData,
-    T: DBTimestamp,
-    R: DBWeight,
-    D: Fallible,
+    where
+        K: DBData,
+        V: DBData,
+        T: DBTimestamp,
+        R: DBWeight,
+        D: Fallible,
 {
     fn deserialize(&self, _deserializer: &mut D) -> Result<FileValBatch<K, V, T, R>, D::Error> {
         unimplemented!();

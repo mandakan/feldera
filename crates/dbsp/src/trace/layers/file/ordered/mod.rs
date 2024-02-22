@@ -2,7 +2,7 @@ mod consumer;
 
 pub use consumer::{FileOrderedLayerConsumer, FileOrderedLayerValues};
 use feldera_storage::file::{
-    reader::{Cursor as FileCursor, FallibleEq, Reader},
+    reader::{Cursor as FileCursor, Error as ReaderError, FallibleEq, Reader},
     writer::{Parameters, Writer2},
 };
 use rand::{seq::index::sample, Rng};
@@ -15,6 +15,7 @@ use crate::{
     },
     DBData, DBWeight, NumEntries, Runtime,
 };
+use std::path::Path;
 use std::{
     cmp::{min, Ordering},
     fmt::Debug,
@@ -93,6 +94,11 @@ where
             file: Reader::empty(&Runtime::storage()).unwrap(),
             lower_bound: 0,
         }
+    }
+
+    pub fn from_path<P: AsRef<Path>>(path: P, lower_bound: usize) -> Result<Self, ReaderError> {
+        let file = Reader::open(&Runtime::storage(), path)?;
+        Ok(Self { file, lower_bound })
     }
 }
 

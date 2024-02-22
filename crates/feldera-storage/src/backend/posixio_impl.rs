@@ -14,6 +14,7 @@ use std::{
     task::Context,
     time::Instant,
 };
+use std::os::unix::fs::MetadataExt;
 use tempfile::TempDir;
 
 use crate::{backend::NEXT_FILE_HANDLE, buffer_cache::FBuf, init};
@@ -36,6 +37,7 @@ fn open_as_direct<P: AsRef<Path>>(p: P, options: &mut OpenOptions) -> Result<Fil
     }
     options.open(p)
 }
+
 /// Meta-data we keep per file we created.
 struct FileMetaData {
     file: File,
@@ -180,6 +182,29 @@ impl StorageControl for PosixBackend {
         Ok(FileHandle(file_counter))
     }
 
+    async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError> {
+        let path = self.base.join(name);
+        let attr = std::fs::metadata(&path)?;
+
+        let file = open_as_direct(&path, OpenOptions::new().read(true))?;
+        let mut files = self.files.write().unwrap();
+
+        let file_counter = self.next_file_id.increment();
+        files.insert(
+            file_counter,
+            FileMetaData {
+                file,
+                path,
+                buffers: Vec::new(),
+                offset: 0,
+                len: attr.size(),
+            },
+        );
+
+        Ok(ImmutableFileHandle(file_counter))
+    }
+
+
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
             .map(|_| counter!(FILES_DELETED).increment(1))
@@ -269,8 +294,8 @@ impl StorageRead for PosixBackend {
 
 impl StorageExecutor for PosixBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future,
+        where
+            F: Future,
     {
         // Extracts the result from `future` assuming that it's already ready.
         let waker = noop_waker();

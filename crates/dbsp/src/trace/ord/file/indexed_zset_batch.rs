@@ -14,10 +14,11 @@ use crate::{
     },
     DBData, DBWeight, NumEntries,
 };
+use feldera_storage::file::reader::Error as ReaderError;
 use rand::Rng;
 use rkyv::{ser::Serializer, Archive, Archived, Deserialize, Fallible, Serialize};
 use size_of::SizeOf;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
     fmt::{self, Debug, Display},
     ops::{Add, AddAssign, Neg},
@@ -183,7 +184,6 @@ where
 {
     type Output = Self;
     #[inline]
-
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             layer: self.layer.add(rhs.layer),
@@ -240,8 +240,8 @@ where
     type Time = ();
     type R = R;
     type Cursor<'s> = FileIndexedZSetCursor<'s, K, V, R>
-    where
-        V: 's;
+        where
+            V: 's;
     type Consumer = FileIndexedZSetConsumer<K, V, R>;
 
     #[inline]
@@ -326,8 +326,14 @@ where
             layer: FileOrderedLayer::empty(),
         }
     }
+
     fn persistent_id(&self) -> Option<PathBuf> {
         Some(self.layer.path())
+    }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
+        let layer = FileOrderedLayer::from_path(path, 0)?;
+        Ok(Self { layer })
     }
 }
 
@@ -636,9 +642,9 @@ where
     V: DBData,
     R: DBWeight,
 {
-    type ValueConsumer<'a> = FileIndexedZSetValueConsumer<'a, K, V,  R>
-    where
-        Self: 'a;
+    type ValueConsumer<'a> = FileIndexedZSetValueConsumer<'a, K, V, R>
+        where
+            Self: 'a;
 
     fn key_valid(&self) -> bool {
         self.consumer.key_valid()

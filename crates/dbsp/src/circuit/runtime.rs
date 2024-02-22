@@ -177,6 +177,7 @@ impl WorkerPanicInfo {
 struct RuntimeInner {
     layout: Layout,
     storage: StorageLocation,
+    start_checkpoint: u64,
     store: LocalStore,
     // Panic info collected from failed worker threads.
     panic_info: Vec<RwLock<Option<WorkerPanicInfo>>>,
@@ -236,7 +237,7 @@ impl Debug for RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(layout: Layout, storage: Option<String>) -> Self {
+    fn new(layout: Layout, storage: Option<String>, start_checkpoint: u64) -> Self {
         let local_workers = layout.local_workers().len();
         let mut panic_info = Vec::with_capacity(local_workers);
         for _ in 0..local_workers {
@@ -245,7 +246,12 @@ impl RuntimeInner {
         let storage = storage.map_or_else(
             // Note that we use into_path() here which avoids deleting the temporary directory
             // we still clean it up when the runtime is dropped -- but keep it around on panic.
-            || StorageLocation::Temporary(tempfile::tempdir().unwrap().into_path()),
+            || {
+                if start_checkpoint > 0 {
+                    panic!("Cannot specify a checkpoint without a storage location");
+                }
+                StorageLocation::Temporary(tempfile::tempdir().unwrap().into_path())
+            },
             |s| {
                 StorageLocation::Permanent(LockedDirectory::new(s).expect(
                     "Failed to create pidfile for storage directory, is it already in use?",
@@ -256,6 +262,7 @@ impl RuntimeInner {
         Self {
             layout,
             storage,
+            start_checkpoint,
             store: TypedDashMap::new(),
             panic_info,
         }
@@ -356,7 +363,8 @@ impl Runtime {
         let layout = cconf.layout();
         let workers = layout.local_workers();
         let nworkers = workers.len();
-        let runtime = Self(Arc::new(RuntimeInner::new(layout, storage)));
+        let checkpoint = cconf.start_checkpoint();
+        let runtime = Self(Arc::new(RuntimeInner::new(layout, storage, checkpoint)));
 
         // Install custom panic hook.
         let default_hook = default_panic_hook();
@@ -444,6 +452,10 @@ impl Runtime {
                 Rc::new(BufferCache::new(Runtime::backend()));
         }
         CACHE.with(|rc| rc.clone())
+    }
+
+    pub(crate) fn start_checkpoint(&self) -> u64 {
+        self.inner().start_checkpoint
     }
 
     /// Returns 0-based index of the current worker thread within its runtime.
@@ -700,6 +712,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: None,
+            init_checkpoint: 0,
         };
         let storage_path_clone = storage_path.clone();
         let hruntime = Runtime::run(cconf, move || {
@@ -720,6 +733,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: None,
+            init_checkpoint: 0,
         };
         let storage_path_clone = storage_path.clone();
         let hruntime = Runtime::run(cconf, move || {

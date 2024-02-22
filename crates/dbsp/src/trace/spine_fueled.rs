@@ -662,6 +662,15 @@ where
         Self::with_effort(1, activator)
     }
 
+    fn from_step_id<S: AsRef<str>>(
+        activator: Option<Activator>,
+        _persistent_id: S,
+        sid: u64,
+    ) -> Self {
+        assert_eq!(sid, 0, "This type doesn't support checkpoints");
+        Self::with_effort(1, activator)
+    }
+
     fn recede_to(&mut self, frontier: &B::Time) {
         // Complete all in-progress merges, as we don't have an easy way to update
         // timestamps in an ongoing merge.

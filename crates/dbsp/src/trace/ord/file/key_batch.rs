@@ -13,11 +13,12 @@ use crate::{
     },
     DBData, DBTimestamp, DBWeight, NumEntries,
 };
+use feldera_storage::file::reader::Error as ReaderError;
 use rand::Rng;
 use rkyv::{ser::Serializer, Archive, Archived, Deserialize, Fallible, Serialize};
 use size_of::SizeOf;
 use std::fmt::{self, Debug, Display};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A batch of keys with weights and times.
 ///
@@ -152,6 +153,15 @@ where
 
     fn persistent_id(&self) -> Option<PathBuf> {
         Some(self.layer.path())
+    }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
+        let layer = FileOrderedLayer::from_path(path, 0)?;
+        Ok(Self {
+            layer,
+            lower: Antichain::new(),
+            upper: Antichain::new(),
+        })
     }
 }
 
@@ -490,8 +500,8 @@ where
     R: DBWeight,
 {
     type ValueConsumer<'a> = FileKeyValueConsumer<'a, K, T, R>
-    where
-        Self: 'a;
+        where
+            Self: 'a;
 
     fn key_valid(&self) -> bool {
         self.consumer.key_valid()

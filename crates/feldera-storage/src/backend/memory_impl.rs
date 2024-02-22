@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, RwLock},
     task::Context,
 };
+use std::io::{Error, ErrorKind};
 
 use crate::{backend::NEXT_FILE_HANDLE, buffer_cache::FBuf};
 
@@ -92,6 +93,18 @@ impl StorageControl for MemoryBackend {
         Ok(FileHandle(file_counter))
     }
 
+    async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError> {
+        let files = self.files.read().unwrap();
+        let file_id = files
+            .iter()
+            .find(|(_, fm)| fm.name == name.as_ref())
+            .map(|(id, _)| *id)
+            .ok_or(StorageError::StdIo(Error::from(ErrorKind::NotFound)))?;
+
+        Ok(ImmutableFileHandle(file_id))
+    }
+
+
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
     }
@@ -170,8 +183,8 @@ impl StorageRead for MemoryBackend {
 
 impl StorageExecutor for MemoryBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future,
+        where
+            F: Future,
     {
         // Extracts the result from `future` assuming that it's already ready.
         let waker = noop_waker();
