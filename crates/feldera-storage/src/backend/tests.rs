@@ -112,6 +112,10 @@ impl<const ALLOW_OVERWRITE: bool> StorageControl for InMemoryBackend<ALLOW_OVERW
         Ok(FileHandle(file_counter))
     }
 
+    async fn open<P: AsRef<Path>>(&self, _name: P) -> Result<ImmutableFileHandle, StorageError> {
+        unimplemented!()
+    }
+
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.immutable_files.borrow_mut().remove(&fd.0);
         Ok(())

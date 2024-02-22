@@ -65,8 +65,8 @@ impl VarintWriter {
         }
     }
     fn put<V>(&self, dst: &mut FBuf, values: V)
-    where
-        V: Iterator<Item = u64>,
+        where
+            V: Iterator<Item=u64>,
     {
         dst.resize(self.start, 0);
         let mut count = 0;
@@ -168,13 +168,13 @@ impl Default for Parameters {
 trait IntoBlock {
     fn into_block(self) -> FBuf;
     fn overwrite_head(&self, dst: &mut FBuf)
-    where
-        Self: FixedLen;
+        where
+            Self: FixedLen;
 }
 
 impl<B> IntoBlock for B
-where
-    B: for<'a> BinWrite<Args<'a> = ()>,
+    where
+        B: for<'a> BinWrite<Args<'a>=()>,
 {
     fn into_block(self) -> FBuf {
         let mut block = NoSeek::new(FBuf::with_capacity(4096));
@@ -183,8 +183,8 @@ where
     }
 
     fn overwrite_head(&self, dst: &mut FBuf)
-    where
-        Self: FixedLen,
+        where
+            Self: FixedLen,
     {
         let mut writer = Cursor::new(dst.as_mut_slice());
         self.write_le(&mut writer).unwrap();
@@ -220,10 +220,10 @@ impl ColumnWriter {
         &mut self,
         block_writer: &mut BlockWriter<W>,
     ) -> Result<FileTrailerColumn, StorageError>
-    where
-        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        K: Rkyv,
-        A: Rkyv,
+        where
+            W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            K: Rkyv,
+            A: Rkyv,
     {
         // Flush data.
         if !self.data_block.is_empty() {
@@ -278,9 +278,9 @@ impl ColumnWriter {
         block_writer: &mut BlockWriter<W>,
         data_block: DataBlock<K>,
     ) -> Result<(), StorageError>
-    where
-        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        K: Rkyv,
+        where
+            W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            K: Rkyv,
     {
         let location = block_writer.write_block(data_block.raw)?;
 
@@ -300,9 +300,9 @@ impl ColumnWriter {
         mut index_block: IndexBlock<K>,
         mut level: usize,
     ) -> Result<(BlockLocation, u64), StorageError>
-    where
-        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        K: Rkyv,
+        where
+            W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            K: Rkyv,
     {
         loop {
             let location = block_writer.write_block(index_block.raw)?;
@@ -326,10 +326,10 @@ impl ColumnWriter {
         item: (&K, &A),
         row_group: &Option<Range<u64>>,
     ) -> Result<(), StorageError>
-    where
-        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-        K: Rkyv,
-        A: Rkyv,
+        where
+            W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+            K: Rkyv,
+            A: Rkyv,
     {
         if let Some(data_block) = self.data_block.add_item(item, row_group) {
             self.write_data_block(block_writer, data_block)?;
@@ -417,9 +417,9 @@ impl DataBlockBuilder {
         replace(self, Self::new(&self.parameters))
     }
     fn try_add_item<K, A>(&mut self, item: (&K, &A), row_group: &Option<Range<u64>>) -> bool
-    where
-        K: Rkyv,
-        A: Rkyv,
+        where
+            K: Rkyv,
+            A: Rkyv,
     {
         if self.value_offsets.len() >= self.parameters.max_branch() {
             return false;
@@ -461,9 +461,9 @@ impl DataBlockBuilder {
         item: (&K, &A),
         row_group: &Option<Range<u64>>,
     ) -> Option<DataBlock<K>>
-    where
-        K: Rkyv,
-        A: Rkyv,
+        where
+            K: Rkyv,
+            A: Rkyv,
     {
         if self.try_add_item(item, row_group) {
             None
@@ -505,9 +505,9 @@ impl DataBlockBuilder {
         }
     }
     fn build<K, A>(mut self) -> DataBlock<K>
-    where
-        K: Rkyv,
-        A: Rkyv,
+        where
+            K: Rkyv,
+            A: Rkyv,
     {
         let specs = self.specs();
 
@@ -620,25 +620,25 @@ struct IndexBlock<K> {
 }
 
 fn rkyv_deserialize<K>(src: &FBuf, offset: usize) -> K
-where
-    K: Rkyv,
+    where
+        K: Rkyv,
 {
     let archived = unsafe { archived_value::<K>(src.as_slice(), offset) };
     archived.deserialize(&mut Infallible).unwrap()
 }
 
 fn rkyv_deserialize_key<K, A>(src: &FBuf, offset: usize) -> K
-where
-    K: Rkyv,
-    A: Rkyv,
+    where
+        K: Rkyv,
+        A: Rkyv,
 {
     let archived = unsafe { archived_value::<Item<K, A>>(src.as_slice(), offset) };
     archived.0.deserialize(&mut Infallible).unwrap()
 }
 
 fn rkyv_serialize<T>(dst: &mut FBuf, value: &T) -> usize
-where
-    T: Archive + Serialize<Serializer>,
+    where
+        T: Archive + Serialize<Serializer>,
 {
     let old_len = dst.len();
 
@@ -683,8 +683,8 @@ impl IndexBlockBuilder {
         )
     }
     fn try_add_entry<K>(&mut self, child: BlockLocation, min_max: &(K, K), n_rows: u64) -> bool
-    where
-        K: Rkyv,
+        where
+            K: Rkyv,
     {
         if self.entries.len() >= self.parameters.max_branch() {
             return false;
@@ -723,8 +723,8 @@ impl IndexBlockBuilder {
         min_max: &(K, K),
         n_rows: u64,
     ) -> Option<IndexBlock<K>>
-    where
-        K: Rkyv,
+        where
+            K: Rkyv,
     {
         let f = |t: &mut Self| t.try_add_entry(child, min_max, n_rows);
         if f(self) {
@@ -771,8 +771,8 @@ impl IndexBlockBuilder {
         }
     }
     fn build<K>(mut self) -> IndexBlock<K>
-    where
-        K: Rkyv,
+        where
+            K: Rkyv,
     {
         let specs = self.specs();
 
@@ -824,8 +824,8 @@ impl IndexBlockBuilder {
 }
 
 struct BlockWriter<W>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     cache: Rc<BufferCache<W, FileCacheEntry>>,
     file_handle: Option<FileHandle>,
@@ -833,8 +833,8 @@ where
 }
 
 impl<W> BlockWriter<W>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn new(cache: &Rc<BufferCache<W, FileCacheEntry>>, file_handle: FileHandle) -> Self {
         Self {
@@ -864,8 +864,8 @@ where
 }
 
 impl<W> Drop for BlockWriter<W>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     fn drop(&mut self) {
         /*
@@ -883,8 +883,8 @@ where
 /// all the same type.  Thus, [`Writer1`] and [`Writer2`] exist for writing
 /// 1-column and 2-column layer files, respectively, with added type safety.
 struct Writer<W>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
 {
     writer: BlockWriter<W>,
     cws: Vec<ColumnWriter>,
@@ -892,8 +892,8 @@ where
 }
 
 impl<W> Writer<W>
-where
-    W: StorageRead + StorageControl + StorageWrite + StorageExecutor,
+    where
+        W: StorageRead + StorageControl + StorageWrite + StorageExecutor,
 {
     pub fn new(
         writer: &Rc<BufferCache<W, FileCacheEntry>>,
@@ -914,9 +914,9 @@ where
     }
 
     pub fn write<K, A>(&mut self, column: usize, item: (&K, &A)) -> Result<(), StorageError>
-    where
-        K: Rkyv + Ord,
-        A: Rkyv,
+        where
+            K: Rkyv + Ord,
+            A: Rkyv,
     {
         let row_group = if column + 1 < self.n_columns() {
             let row_group = self.cws[column + 1].take_rows();
@@ -932,9 +932,9 @@ where
     }
 
     pub fn finish_column<K, A>(&mut self, column: usize) -> Result<(), StorageError>
-    where
-        K: Rkyv + Ord,
-        A: Rkyv,
+        where
+            K: Rkyv + Ord,
+            A: Rkyv,
     {
         debug_assert_eq!(column, self.finished_columns.len());
         for cw in self.cws.iter().skip(1) {
@@ -984,7 +984,8 @@ where
 /// through `(999, ())`.
 ///
 /// ```
-/// # use feldera_storage::file::{cache::BufferCache, writer::{Parameters, Writer1}};
+/// # use feldera_storage::buffer_cache::BufferCache;
+/// # use feldera_storage::file::writer::{Parameters, Writer1};
 /// let mut file = Writer1::new(&BufferCache::default_for_thread(), Parameters::default()).unwrap();
 /// for i in 0..1000_u32 {
 ///     file.write0((&i, &())).unwrap();
@@ -992,20 +993,20 @@ where
 /// file.close().unwrap();
 /// ```
 pub struct Writer1<W, K0, A0>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K0: Rkyv,
-    A0: Rkyv,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K0: Rkyv,
+        A0: Rkyv,
 {
     inner: Writer<W>,
     _phantom: PhantomData<(K0, A0)>,
 }
 
 impl<W, K0, A0> Writer1<W, K0, A0>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K0: Rkyv + Ord,
-    A0: Rkyv,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K0: Rkyv + Ord,
+        A0: Rkyv,
 {
     /// Creates a new writer with the given parameters.
     pub fn new(
@@ -1066,7 +1067,8 @@ where
 /// `(0, ())` through `(9, ())`.
 ///
 /// ```
-/// # use feldera_storage::file::{cache::BufferCache, writer::{Parameters, Writer2}};
+/// # use feldera_storage::buffer_cache::BufferCache;
+/// # use feldera_storage::file::writer::{Parameters, Writer2};
 /// let mut file = Writer2::new(&BufferCache::default_for_thread(), Parameters::default()).unwrap();
 /// for i in 0..1000_u32 {
 ///     for j in 0..10_u32 {
@@ -1077,24 +1079,24 @@ where
 /// file.close().unwrap();
 /// ```
 pub struct Writer2<W, K0, A0, K1, A1>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K0: Rkyv + Ord,
-    A0: Rkyv,
-    K1: Rkyv + Ord,
-    A1: Rkyv,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K0: Rkyv + Ord,
+        A0: Rkyv,
+        K1: Rkyv + Ord,
+        A1: Rkyv,
 {
     inner: Writer<W>,
     _phantom: PhantomData<(K0, A0, K1, A1)>,
 }
 
 impl<W, K0, A0, K1, A1> Writer2<W, K0, A0, K1, A1>
-where
-    W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
-    K0: Rkyv + Ord,
-    A0: Rkyv,
-    K1: Rkyv + Ord,
-    A1: Rkyv,
+    where
+        W: StorageRead + StorageWrite + StorageControl + StorageExecutor,
+        K0: Rkyv + Ord,
+        A0: Rkyv,
+        K1: Rkyv + Ord,
+        A1: Rkyv,
 {
     /// Creates a new writer with the given parameters.
     pub fn new(
