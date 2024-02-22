@@ -105,6 +105,7 @@ use std::path::PathBuf;
 use std::{
     cmp::max,
     fmt::{self, Debug, Display, Formatter, Write},
+    fs,
     marker::PhantomData,
     mem::replace,
 };
@@ -461,6 +462,26 @@ where
                 _ => Ok(acc),
             })
     }
+
+    /// Return the absolute path of the file for this Spine checkpoint.
+    ///
+    /// # Arguments
+    /// - `sid`: The step id of the checkpoint.
+    fn checkpoint_path<P: AsRef<str>>(persistent_id: P, sid: u64) -> PathBuf {
+        let rt = Runtime::runtime().unwrap();
+        let path = PathBuf::from(rt.storage_path());
+        path.join(format!("pspine-{}-{}.dat", sid, persistent_id.as_ref()))
+    }
+
+    /// Return the absolute path of the file for this Spine's batchlist.
+    ///
+    /// # Arguments
+    /// - `sid`: The step id of the checkpoint.
+    fn batchlist_path(&self, sid: u64) -> PathBuf {
+        let rt = Runtime::runtime().unwrap();
+        let path = PathBuf::from(rt.storage_path());
+        path.join(format!("pspine-batches-{}-{}.dat", sid, self.persistent_id))
+    }
 }
 
 #[derive(Clone)]
@@ -687,8 +708,27 @@ where
         persistent_id: S,
         sid: u64,
     ) -> Self {
-        assert_eq!(sid, 0, "This type should! support checkpoints");
-        let spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()), sid);
+        let mut spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()), sid);
+
+        if sid > 0 {
+            let pspine_path = Self::checkpoint_path(persistent_id, sid);
+            let content = fs::read(pspine_path).expect("Checkpoint file should exists.");
+            let archived = unsafe { rkyv::archived_root::<CommittedSpine<B>>(&content) };
+            let committed: CommittedSpine<B> = archived.deserialize(&mut rkyv::Infallible).unwrap();
+            spine.lower = Antichain::from(committed.lower);
+            spine.upper = Antichain::from(committed.upper);
+            spine.effort = committed.effort as usize;
+            spine.dirty = committed.dirty;
+            spine.lower_key_bound = committed.lower_key_bound;
+            spine.key_filter = None; //committed.key_filter;
+            spine.value_filter = None; //committed.value_filter;
+
+            for batch in committed.batches {
+                let batch = B::from_path(&batch).unwrap();
+                spine.insert(batch);
+            }
+        }
+
         spine
     }
 
@@ -811,39 +851,21 @@ where
     }
 
     fn commit(&self, cid: u64) -> Result<(), Error> {
-        //let storage = Runtime::storage();
-        let rt = Runtime::runtime().unwrap();
-        let path = PathBuf::from(rt.storage_path());
-
-        let cspine_path = path.join(format!("pspine-{}-{}.dat", cid, self.persistent_id));
-        //let fd = storage.block_on(async { storage.create_named(path).await })?;
-
+        let cspine_path = Self::checkpoint_path(&self.persistent_id, cid);
         let committed: CommittedSpine<B> = self.into();
         let as_bytes =
             feldera_storage::file::to_bytes(&committed).expect("failed to serialize spine data");
-        //as_bytes.resize(max(512, as_bytes.len().next_power_of_two()), 0);
         std::fs::write(cspine_path, as_bytes).expect("failed to write spine data");
 
-        //storage.block_on(async { storage.write_block(&fd, 0, as_bytes).await })?;
-        //let _ = storage.block_on(async { storage.complete(fd).await })?;
-
-        // Just write the batches as a separate file.
-        let batchlist_path =
-            path.join(format!("pspine-batches-{}-{}.dat", cid, self.persistent_id));
-        //let fd = storage.block_on(async { storage.create_named(path).await })?;
+        // Write the batches as a separate file, this allows to parse this again e.g.,
+        // in `Runtime` without the need to know the exact Spine type.
+        let batchlist_path = self.batchlist_path(cid);
         let batches = committed.batches;
-
         let as_bytes =
             feldera_storage::file::to_bytes(&batches).expect("failed to serialize spine data");
-        //as_bytes.resize(max(512, as_bytes.len().next_power_of_two()), 0);
-        //std::fs::write(batchlist_path, as_bytes).expect("failed to write spine
-        // data");
         let mut f = File::create(batchlist_path)?;
         f.write_all(as_bytes.as_slice())?;
         f.sync_all()?;
-
-        //storage.block_on(async { storage.write_block(&fd, 0, as_bytes).await })?;
-        //let _ = storage.block_on(async { storage.complete(fd).await })?;
 
         Ok(())
     }
