@@ -17,14 +17,17 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub use monoio_impl::MonoioBackend as DefaultBackend;
+
 use crate::buffer_cache::FBuf;
+
 pub mod metrics;
 
 pub mod memory_impl;
@@ -36,6 +39,13 @@ pub(crate) mod tests;
 
 /// A global counter for default backends that are initiated per-core.
 static NEXT_FILE_HANDLE: OnceLock<Arc<AtomicIncrementOnlyI64>> = OnceLock::new();
+
+/// Helper function to append to a [`PathBuf`].
+fn append_to_path(p: PathBuf, s: &str) -> PathBuf {
+    let mut p = p.into_os_string();
+    p.push(s);
+    p.into()
+}
 
 /// An Increment Only Atomic.
 ///
@@ -96,8 +106,8 @@ pub enum StorageError {
 
 impl Serialize for StorageError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
+        where
+            S: Serializer,
     {
         match self {
             Self::StdIo(error) => {
@@ -133,7 +143,26 @@ impl Eq for StorageError {}
 /// A trait for a storage backend to implement so client can create/delete
 /// files.
 pub trait StorageControl {
+    /// Extension added to files that are in writing stage
+    ///
+    /// A file that is created with `create` or `create_named` will add
+    /// `.mut` to its filename which is removed when we call `complete()`.
+    const MUTABLE_EXTENSION: &'static str = ".mut";
+
+    /// Extensions for files that are created anonymously.
+    const CREATE_FILE_EXTENSION: &'static str = ".feldera";
+
     /// Create a new file. See also [`create`](Self::create).
+    ///
+    /// # Arguments
+    /// - name: of the file to create, relative to the base of the storage.
+    ///
+    /// # Notes for implementors
+    /// The implementation of [`create_named`] should ensure that (persistent) files
+    /// have the [`Self::MUTABLE_EXTENSION`] extension added to the name
+    /// until they are completed.
+    /// This makes it easier to detect files that were not completed properly
+    /// in case of aborts/crashes.
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError>;
 
     /// Creates a new persistent file used for writing data.
@@ -144,7 +173,7 @@ pub trait StorageControl {
     /// converted to an [`ImmutableFileHandle`].
     async fn create(&self) -> Result<FileHandle, StorageError> {
         let uuid = Uuid::now_v7();
-        let name = uuid.to_string() + ".feldera";
+        let name = uuid.to_string() + Self::CREATE_FILE_EXTENSION;
         self.create_named(&name).await
     }
 
@@ -275,10 +304,9 @@ pub trait StorageRead {
 pub trait StorageExecutor {
     /// Runs `future` to completion in the storage backend's executor.
     fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future;
+        where
+            F: Future;
 }
 
-pub use monoio_impl::MonoioBackend as DefaultBackend;
 //pub use memory_impl::MemoryBackend as DefaultBackend;
 //pub use posixio_impl::PosixBackend as DefaultBackend;

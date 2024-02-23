@@ -1,11 +1,11 @@
 //! Implementation of the storage backend APIs ([`StorageControl`],
 //! [`StorageRead`], and [`StorageWrite`]) using the Monoio library.
 
+use std::{fs, io};
 use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,20 +14,16 @@ use std::time::Instant;
 
 use async_lock::RwLock;
 use metrics::{counter, histogram};
+use monoio::{FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder};
 use monoio::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
 use monoio::IoUringDriver;
-use monoio::{FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder};
 use tempfile::TempDir;
 
-use crate::backend::{
-    metrics::{
-        FILES_CREATED, FILES_DELETED, READS_FAILED, READS_SUCCESS, READ_LATENCY, TOTAL_BYTES_READ,
-        TOTAL_BYTES_WRITTEN, WRITES_SUCCESS, WRITE_LATENCY,
-    },
-    AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, StorageControl, StorageError,
-    StorageRead, StorageWrite, NEXT_FILE_HANDLE,
-};
+use crate::backend::{append_to_path, AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, metrics::{
+    FILES_CREATED, FILES_DELETED, READ_LATENCY, READS_FAILED, READS_SUCCESS, TOTAL_BYTES_READ,
+    TOTAL_BYTES_WRITTEN, WRITE_LATENCY, WRITES_SUCCESS,
+}, NEXT_FILE_HANDLE, StorageControl, StorageError, StorageRead, StorageWrite};
 use crate::buffer_cache::FBuf;
 use crate::init;
 
@@ -128,12 +124,13 @@ impl MonoioBackend {
 
 impl StorageControl for MonoioBackend {
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
-        let path = self.base.join(name);
+        let path = append_to_path(self.base.join(name), Self::MUTABLE_EXTENSION);
+
         let file = open_as_direct(
             &path,
             OpenOptions::new().create_new(true).write(true).read(true),
         )
-        .await?;
+            .await?;
         let mut files = self.files.write().await;
 
         let file_counter = self.next_file_id.increment();
@@ -153,7 +150,7 @@ impl StorageControl for MonoioBackend {
     /// Opens a file for reading.
     async fn open<P: AsRef<Path>>(&self, name: P) -> Result<ImmutableFileHandle, StorageError> {
         let path = self.base.join(name);
-        let attr = std::fs::metadata(&path)?;
+        let attr = fs::metadata(&path)?;
 
         let file = open_as_direct(&path, OpenOptions::new().read(true)).await?;
         let mut files = self.files.write().await;
@@ -212,8 +209,18 @@ impl StorageWrite for MonoioBackend {
     ) -> Result<(ImmutableFileHandle, PathBuf), StorageError> {
         let mut files = self.files.write().await;
 
-        let fm = files.remove(&fd.0).unwrap();
+        let mut fm = files.remove(&fd.0).unwrap();
+        assert_eq!(fm.path.extension().and_then(|s| s.to_str()), Some(&Self::MUTABLE_EXTENSION[1..]), "Mutable file does not have the right extension");
         fm.file.sync_all().await?;
+
+        // Remove the MUTABLE_EXTENSION from the file name.
+        // This should ideally also happen through monoio/uring but it
+        // doesn't seem to support this at the moment, I'll have to submit a PR.
+        // See also POSIX impl about assumption of fd validity after rename.
+        let new_name = fm.path.with_extension("");
+        fs::rename(&fm.path, &new_name)?;
+        fm.path = new_name;
+
         let path = fm.path.clone();
         files.insert(fd.0, fm);
 
@@ -267,8 +274,8 @@ impl StorageRead for MonoioBackend {
 
 impl StorageExecutor for MonoioBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future,
+        where
+            F: Future,
     {
         #[cfg(target_os = "linux")]
         thread_local! {
@@ -278,7 +285,8 @@ impl StorageExecutor for MonoioBackend {
                              .build()
                              .unwrap())
             }
-        };
+        }
+        ;
         #[cfg(not(target_os = "linux"))]
         thread_local! {
             pub static RUNTIME: RefCell<FusionRuntime<LegacyDriver>> = {

@@ -1,32 +1,19 @@
 //! Implementation of the storage backend APIs ([`StorageControl`],
 //! [`StorageRead`], and [`StorageWrite`]) using POSIX I/O.
 
-use futures::{task::noop_waker, Future};
-use metrics::{counter, histogram};
-use std::{
-    collections::HashMap,
-    fs::{File, OpenOptions},
-    io::{Error as IoError, Seek},
-    os::unix::prelude::FileExt,
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::{Arc, RwLock},
-    task::Context,
-    time::Instant,
-};
+use std::{collections::HashMap, fs::{File, OpenOptions}, fs, io::{Error as IoError, Seek}, os::unix::prelude::FileExt, path::{Path, PathBuf}, rc::Rc, sync::{Arc, RwLock}, task::Context, time::Instant};
 use std::os::unix::fs::MetadataExt;
+
+use futures::{Future, task::noop_waker};
+use metrics::{counter, histogram};
 use tempfile::TempDir;
 
 use crate::{backend::NEXT_FILE_HANDLE, buffer_cache::FBuf, init};
 
-use super::{
-    metrics::{
-        describe_disk_metrics, FILES_CREATED, FILES_DELETED, READS_FAILED, READS_SUCCESS,
-        READ_LATENCY, TOTAL_BYTES_READ, TOTAL_BYTES_WRITTEN, WRITES_SUCCESS, WRITE_LATENCY,
-    },
-    AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, StorageControl, StorageError,
-    StorageExecutor, StorageRead, StorageWrite,
-};
+use super::{append_to_path, AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, metrics::{
+    describe_disk_metrics, FILES_CREATED, FILES_DELETED, READ_LATENCY, READS_FAILED,
+    READS_SUCCESS, TOTAL_BYTES_READ, TOTAL_BYTES_WRITTEN, WRITE_LATENCY, WRITES_SUCCESS,
+}, StorageControl, StorageError, StorageExecutor, StorageRead, StorageWrite};
 
 /// Helper function that opens files as direct IO files on linux.
 fn open_as_direct<P: AsRef<Path>>(p: P, options: &mut OpenOptions) -> Result<File, IoError> {
@@ -160,7 +147,7 @@ impl PosixBackend {
 
 impl StorageControl for PosixBackend {
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError> {
-        let path = name.as_ref().to_path_buf();
+        let path = append_to_path(self.base.join(name), Self::MUTABLE_EXTENSION);
         let file_counter = self.next_file_id.increment();
         let file = open_as_direct(
             &path,
@@ -244,9 +231,18 @@ impl StorageWrite for PosixBackend {
         let mut files = self.files.write().unwrap();
 
         let mut fm = files.remove(&fd.0).unwrap();
-        let path = fm.path.clone();
         fm.flush()?;
         fm.file.sync_all()?;
+
+        // Remove the .mut extension from the file.
+        // I *believe* that on linux/(and less so in general POSIX) open fds are
+        // unaffected by a rename and remain valid. If I'm wrong we just have to close
+        // and open again after the rename.
+        // This would also affect the monoio implementation.
+        let finalized_path = fm.path.with_extension("");
+        fs::rename(&fm.path, &finalized_path)?;
+        fm.path = finalized_path;
+        let path = fm.path.clone();
         files.insert(fd.0, fm);
 
         Ok((ImmutableFileHandle(fd.0), path))
