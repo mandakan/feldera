@@ -193,7 +193,7 @@ where
                                 .add_ternary_operator(
                                     PartitionedRadixTreeAggregate::new(aggregator),
                                     &stream,
-                                    &stream.spill().integrate_trace(),
+                                    &stream.integrate_trace(),
                                     &feedback.delayed_trace,
                                 )
                                 .mark_sharded();

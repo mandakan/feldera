@@ -8,13 +8,12 @@ use crate::{
     circuit::GlobalNodeId,
     circuit_cache_key, default_hash,
     operator::communication::exchange::new_exchange_operators,
-    trace::{cursor::Cursor, merge_batches, Batch, BatchReader, Builder},
+    trace::{cursor::Cursor, merge_batches, ord::SpillableBatch, Batch, BatchReader, Builder},
     Circuit, Runtime, Stream,
 };
 use std::{hash::Hash, panic::Location};
 
 circuit_cache_key!(ShardId<C, D>((GlobalNodeId, ShardingPolicy) => Stream<C, D>));
-circuit_cache_key!(UnshardId<C, D>(GlobalNodeId => Stream<C, D>));
 
 // An attempt to future-proof the design for when we support multiple sharding
 // disciplines.
@@ -28,7 +27,7 @@ fn sharding_policy<C>(_circuit: &C) -> ShardingPolicy {
 impl<C, IB> Stream<C, IB>
 where
     C: Circuit,
-    IB: BatchReader<Time = ()> + Clone,
+    IB: BatchReader<Time = ()> + SpillableBatch + Clone,
     IB::Key: Ord + Clone + Hash,
     IB::Val: Ord + Clone,
 {
@@ -145,11 +144,6 @@ where
                                     merge_batches(batches)
                                 });
 
-                            self.circuit().cache_insert(
-                                UnshardId::new(output.origin_node_id().clone()),
-                                self.clone(),
-                            );
-
                             output
                         },
                     )
@@ -237,14 +231,6 @@ where
                 self.origin_node_id().clone(),
                 sharding_policy(self.circuit()),
             )))
-            .unwrap_or_else(|| self.clone())
-    }
-
-    /// Returns the unsharded version of the stream if it exists, and otherwise
-    /// `self`.
-    pub fn try_unsharded_version(&self) -> Self {
-        self.circuit()
-            .cache_get(&UnshardId::new(self.origin_node_id().clone()))
             .unwrap_or_else(|| self.clone())
     }
 

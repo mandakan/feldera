@@ -163,7 +163,7 @@ where
         range: RelRange<TS>,
     ) -> OrdPartitionedOverStream<PK, TS, Agg::Output, B::R>
     where
-        B: IndexedZSet<Key = TS> + SpillableBatch + Send,
+        B: IndexedZSet<Key = TS> + SpillableBatch,
         Stream<RootCircuit, <B as SpillableBatch>::Spilled>:
             for<'a> FilterMap<RootCircuit, ItemRef<'a> = (&'a B::Key, &'a B::Val), R = B::R>,
         Self: for<'a> FilterMap<RootCircuit, ItemRef<'a> = (&'a B::Key, &'a B::Val), R = B::R>,
@@ -317,9 +317,8 @@ impl<B> Stream<RootCircuit, B> {
         // Build the radix tree over the bounded window.
         let tree = stream_window
             .partitioned_tree_aggregate::<TS, V, Agg>(aggregator.clone())
-            .spill()
             .integrate_trace();
-        let input_trace = stream_window.spill().integrate_trace();
+        let input_trace = stream_window.integrate_trace();
 
         // Truncate timestamps `< bound` in the output trace.
         let bounds = TraceBounds::new();
@@ -801,7 +800,6 @@ mod test {
             bound.set(Tup2(u64::max_value(), None));
 
             aggregate_500_500_warerline
-                .spill()
                 .integrate_trace_with_bound(TraceBound::new(), bound)
                 .apply(move |trace| {
                     if let Some(bound) = size_bound {

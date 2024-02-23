@@ -186,7 +186,7 @@ where
             let output: Stream<RootCircuit, Neighborhood<B::Key, B::Val, B::R>> =
                 self.circuit().add_binary_operator(
                     NeighborhoodNumbered::<Spine<VecIndexedZSet<B::Key, B::Val, B::R>>>::new(),
-                    &local_output.gather(0).integrate_trace(),
+                    &local_output.gather(0).integrate_trace_in_memory(),
                     neighborhood_descr,
                 );
 

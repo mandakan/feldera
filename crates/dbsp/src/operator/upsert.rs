@@ -11,7 +11,7 @@ use crate::{
 };
 use std::{borrow::Cow, marker::PhantomData, ops::Neg};
 
-use super::trace::{BoundsId, FileKeySpine, FileValSpine, TraceAppend};
+use super::trace::{FileKeySpine, FileValSpine, TraceAppend};
 
 impl<C, K> Stream<C, Vec<(K, Option<()>)>>
 where
@@ -90,8 +90,10 @@ where
 
             z1feedback.connect_with_preference(&trace, OwnershipPreference::STRONGLY_PREFER_OWNED);
             circuit.cache_insert(DelayedTraceId::new(trace.origin_node_id().clone()), local);
-            circuit.cache_insert(BoundsId::new(delta.origin_node_id().clone()), bounds);
-            circuit.cache_insert(TraceId::new(delta.origin_node_id().clone()), trace);
+            circuit.cache_insert(
+                TraceId::new(delta.origin_node_id().clone()),
+                (trace, bounds),
+            );
             delta
         })
     }
@@ -178,8 +180,10 @@ where
 
             z1feedback.connect_with_preference(&trace, OwnershipPreference::STRONGLY_PREFER_OWNED);
             circuit.cache_insert(DelayedTraceId::new(trace.origin_node_id().clone()), local);
-            circuit.cache_insert(BoundsId::new(delta.origin_node_id().clone()), bounds);
-            circuit.cache_insert(TraceId::new(delta.origin_node_id().clone()), trace);
+            circuit.cache_insert(
+                TraceId::new(delta.origin_node_id().clone()),
+                (trace, bounds),
+            );
             delta
         })
     }

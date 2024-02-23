@@ -76,7 +76,7 @@ where
     }
 
     fn export(self) -> Self::Export {
-        self.integrate_trace().export()
+        self.integrate_trace_in_memory().export()
     }
 
     fn consolidate(exports: Self::Export) -> Self::Output {

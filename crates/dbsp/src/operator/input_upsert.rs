@@ -15,8 +15,6 @@ use rkyv::{Archive, Deserialize, Serialize};
 use size_of::SizeOf;
 use std::{borrow::Cow, marker::PhantomData, ops::Neg};
 
-use super::trace::BoundsId;
-
 #[derive(
     Clone,
     Debug,
@@ -131,8 +129,10 @@ where
 
             z1feedback.connect_with_preference(&trace, OwnershipPreference::STRONGLY_PREFER_OWNED);
             circuit.cache_insert(DelayedTraceId::new(trace.origin_node_id().clone()), local);
-            circuit.cache_insert(BoundsId::new(delta.origin_node_id().clone()), bounds);
-            circuit.cache_insert(TraceId::new(delta.origin_node_id().clone()), trace);
+            circuit.cache_insert(
+                TraceId::new(delta.origin_node_id().clone()),
+                (trace, bounds),
+            );
             delta
         })
     }
