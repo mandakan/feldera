@@ -24,6 +24,7 @@ use std::{
     ops::{Add, AddAssign, Neg},
     rc::Rc,
 };
+use std::path::PathBuf;
 
 /// An immutable collection of `(key, weight)` pairs without timing information.
 #[derive(Debug, Clone, Eq, PartialEq, SizeOf, Archive, Serialize, Deserialize)]
@@ -266,6 +267,10 @@ where
 
     fn item_from(key: K, _val: ()) -> Self::Item {
         key
+    }
+    
+    fn persistent_id(&self) -> Option<PathBuf> {
+        unimplemented!()
     }
 
     fn from_keys(time: Self::Time, keys: Vec<(Self::Key, Self::R)>) -> Self {

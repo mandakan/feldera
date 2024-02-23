@@ -27,6 +27,7 @@ use std::{
     fmt::{self, Debug},
     marker::PhantomData,
 };
+use std::path::PathBuf;
 
 /// Convert any batch into a vector of tuples.
 pub fn batch_to_tuples<B>(batch: &B) -> Vec<((B::Key, B::Val, B::Time), B::R)>
@@ -890,6 +891,10 @@ where
     type Builder = TestBatchBuilder<K, V, T, R>;
     type Merger = TestBatchMerger<K, V, T, R>;
 
+    fn persistent_id(&self) -> Option<PathBuf> {
+        unimplemented!()
+    }
+
     fn item_from(key: Self::Key, val: Self::Val) -> Self::Item {
         (key, val)
     }
@@ -932,6 +937,10 @@ where
             key_filter: None,
             value_filter: None,
         }
+    }
+
+    fn from_step_id<S: AsRef<str>>(_activator: Option<Activator>, _persistent_id: S, _sid: u64) -> Self {
+        unimplemented!()
     }
 
     fn recede_to(&mut self, frontier: &Self::Time) {

@@ -508,8 +508,12 @@ where
             cf,
             cf_name,
             _cf_options: cf_options,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
+    }
+
+    fn from_step_id<S: AsRef<str>>(_activator: Option<Activator>, _persistent_id: S, _sid: u64) -> Self {
+        unimplemented!()
     }
 
     /// Recede to works by sending a `RecedeTo` command to every key in the

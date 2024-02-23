@@ -154,7 +154,7 @@ impl Display for WorkerPanicInfo {
 impl WorkerPanicInfo {
     fn new(panic_info: &PanicInfo) -> Self {
         #[allow(clippy::manual_map)]
-        let message = if let Some(v) = panic_info.payload().downcast_ref::<String>() {
+            let message = if let Some(v) = panic_info.payload().downcast_ref::<String>() {
             Some(v.clone())
         } else if let Some(v) = panic_info.payload().downcast_ref::<&str>() {
             Some(v.to_string())
@@ -356,8 +356,8 @@ impl Runtime {
     /// # }
     /// ```
     pub fn run<F>(cconf: impl IntoCircuitConfig, circuit: F) -> RuntimeHandle
-    where
-        F: FnOnce() + Clone + Send + 'static,
+        where
+            F: FnOnce() + Clone + Send + 'static,
     {
         let storage = cconf.storage();
         let layout = cconf.layout();
@@ -627,7 +627,7 @@ impl RuntimeHandle {
     pub fn join(self) -> ThreadResult<()> {
         // Insist on joining all threads even if some of them fail.
         #[allow(clippy::needless_collect)]
-        let results: Vec<ThreadResult<()>> = self
+            let results: Vec<ThreadResult<()>> = self
             .workers
             .into_iter()
             .map(|h| h.join_handle.join())
@@ -693,6 +693,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: Some(path.to_str().unwrap().to_string()),
+            init_checkpoint: 0,
         };
 
         let hruntime = Runtime::run(cconf, move || {
@@ -752,8 +753,8 @@ mod tests {
     }
 
     fn test_runtime<S>()
-    where
-        S: Scheduler + 'static,
+        where
+            S: Scheduler + 'static,
     {
         let hruntime = Runtime::run(4, || {
             let data = Rc::new(RefCell::new(vec![]));
@@ -768,8 +769,8 @@ mod tests {
                     .inspect(move |n: &usize| data_clone.borrow_mut().push(*n));
                 Ok(())
             })
-            .unwrap()
-            .0;
+                .unwrap()
+                .0;
 
             for _ in 0..100 {
                 root.step().unwrap();
@@ -795,8 +796,8 @@ mod tests {
 
     // Test `RuntimeHandle::kill`.
     fn test_kill<S>()
-    where
-        S: Scheduler + 'static,
+        where
+            S: Scheduler + 'static,
     {
         let hruntime = Runtime::run(16, || {
             // Create a nested circuit that iterates forever.
@@ -815,8 +816,8 @@ mod tests {
                     .unwrap();
                 Ok(())
             })
-            .unwrap()
-            .0;
+                .unwrap()
+                .0;
 
             loop {
                 if root.step().is_err() {

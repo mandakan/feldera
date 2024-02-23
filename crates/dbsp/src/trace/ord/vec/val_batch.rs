@@ -20,6 +20,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     marker::PhantomData,
 };
+use std::path::PathBuf;
 
 pub type VecValBatchLayer<K, V, T, R, O> =
     OrderedLayer<K, OrderedLayer<V, ColumnLayer<T, R>, O>, O>;
@@ -150,6 +151,10 @@ where
     type Batcher = MergeBatcher<(K, V), T, R, Self>;
     type Builder = VecValBuilder<K, V, T, R, O>;
     type Merger = VecValMerger<K, V, T, R, O>;
+
+    fn persistent_id(&self) -> Option<PathBuf> {
+        unimplemented!()
+    }
 
     fn item_from(key: K, val: V) -> Self::Item {
         (key, val)

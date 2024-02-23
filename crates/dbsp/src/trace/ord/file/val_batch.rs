@@ -6,7 +6,6 @@ use std::{
 };
 
 use feldera_storage::{
-    backend::{StorageControl, StorageExecutor, StorageRead},
     file::{
         reader::{ColumnSpec, Cursor as FileCursor, Error as ReaderError, Reader},
         writer::{Parameters, Writer2},

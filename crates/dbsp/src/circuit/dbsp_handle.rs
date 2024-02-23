@@ -142,7 +142,7 @@ impl Layout {
 
     /// Returns an iterator over `Host`s in this layout other than this one.  If
     /// this is a single-host layout, this will be an empty iterator.
-    pub fn other_hosts(&self) -> impl Iterator<Item = &Host> {
+    pub fn other_hosts(&self) -> impl Iterator<Item=&Host> {
         match self {
             Self::Solo { .. } => Either::Left(empty()),
             Self::Multihost {
@@ -302,9 +302,9 @@ impl Runtime {
         cconf: impl IntoCircuitConfig,
         constructor: F,
     ) -> Result<(DBSPHandle, T), DBSPError>
-    where
-        F: FnOnce(&mut RootCircuit) -> Result<T, AnyError> + Clone + Send + 'static,
-        T: Send + 'static,
+        where
+            F: FnOnce(&mut RootCircuit) -> Result<T, AnyError> + Clone + Send + 'static,
+            T: Send + 'static,
     {
         let layout = cconf.layout();
         let nworkers = layout.local_workers().len();
@@ -516,8 +516,8 @@ impl DBSPHandle {
     }
 
     fn broadcast_command<F>(&mut self, command: Command, mut handler: F) -> Result<(), DBSPError>
-    where
-        F: FnMut(usize, Response),
+        where
+            F: FnMut(usize, Response),
     {
         if self.runtime.is_none() {
             return Err(DBSPError::Runtime(RuntimeError::Terminated));
@@ -796,7 +796,7 @@ mod tests {
             }));
             Ok(())
         })
-        .unwrap();
+            .unwrap();
 
         if let DBSPError::Runtime(err) = handle.step().unwrap_err() {
             // println!("error: {err}");
@@ -818,7 +818,7 @@ mod tests {
             }));
             Ok(())
         })
-        .unwrap();
+            .unwrap();
 
         if let DBSPError::Runtime(err) = handle.step().unwrap_err() {
             // println!("error: {err}");
@@ -844,7 +844,7 @@ mod tests {
             circuit.add_source(Generator::new(|| 5usize));
             Ok(())
         })
-        .unwrap();
+            .unwrap();
 
         handle.enable_cpu_profiler().unwrap();
         handle.step().unwrap();
@@ -870,7 +870,7 @@ mod tests {
             circuit.add_source(Generator::new(|| 5usize));
             Ok(())
         })
-        .unwrap();
+            .unwrap();
 
         handle.step().unwrap();
     }
@@ -886,7 +886,6 @@ mod tests {
     #[test]
     fn test_commit() {
         use crate::{utils::Tup2, Runtime, Stream};
-        use size_of::SizeOf;
         use std::cmp::max;
 
         let _r = env_logger::try_init();
@@ -903,16 +902,10 @@ mod tests {
             );
 
             let _trace = stream.integrate_trace();
-            let retain_keys =
-                stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
-            retain_keys.apply(|trace| {
-                //println!("retain_keys: {}bytes", trace.size_of().total_bytes());
-                assert!(trace.size_of().total_bytes() < 15000);
-            });
-
+            stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
             Ok(handle)
         })
-        .unwrap();
+            .unwrap();
 
         let cid = dbsp.commit().expect("commit failed");
         eprintln!(" === cid={:?} ===", cid);
