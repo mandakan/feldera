@@ -142,7 +142,7 @@ impl Layout {
 
     /// Returns an iterator over `Host`s in this layout other than this one.  If
     /// this is a single-host layout, this will be an empty iterator.
-    pub fn other_hosts(&self) -> impl Iterator<Item=&Host> {
+    pub fn other_hosts(&self) -> impl Iterator<Item = &Host> {
         match self {
             Self::Solo { .. } => Either::Left(empty()),
             Self::Multihost {
@@ -224,6 +224,20 @@ impl CircuitConfig {
     }
 }
 
+impl IntoCircuitConfig for &CircuitConfig {
+    fn layout(&self) -> Layout {
+        self.layout.clone()
+    }
+
+    fn storage(&self) -> Option<String> {
+        self.storage.clone()
+    }
+
+    fn start_checkpoint(&self) -> u64 {
+        self.init_checkpoint
+    }
+}
+
 impl IntoCircuitConfig for CircuitConfig {
     fn layout(&self) -> Layout {
         self.layout.clone()
@@ -302,9 +316,9 @@ impl Runtime {
         cconf: impl IntoCircuitConfig,
         constructor: F,
     ) -> Result<(DBSPHandle, T), DBSPError>
-        where
-            F: FnOnce(&mut RootCircuit) -> Result<T, AnyError> + Clone + Send + 'static,
-            T: Send + 'static,
+    where
+        F: FnOnce(&mut RootCircuit) -> Result<T, AnyError> + Clone + Send + 'static,
+        T: Send + 'static,
     {
         let layout = cconf.layout();
         let nworkers = layout.local_workers().len();
@@ -516,8 +530,8 @@ impl DBSPHandle {
     }
 
     fn broadcast_command<F>(&mut self, command: Command, mut handler: F) -> Result<(), DBSPError>
-        where
-            F: FnMut(usize, Response),
+    where
+        F: FnMut(usize, Response),
     {
         if self.runtime.is_none() {
             return Err(DBSPError::Runtime(RuntimeError::Terminated));
@@ -738,8 +752,10 @@ impl Drop for DBSPHandle {
 mod tests {
     use std::time::Duration;
 
+    use crate::circuit::{CircuitConfig, Layout};
     use crate::{operator::Generator, Circuit, Error as DBSPError, Runtime, RuntimeError};
     use anyhow::anyhow;
+    use tempfile::tempdir;
 
     // Panic during initialization in worker thread.
     #[test]
@@ -796,7 +812,7 @@ mod tests {
             }));
             Ok(())
         })
-            .unwrap();
+        .unwrap();
 
         if let DBSPError::Runtime(err) = handle.step().unwrap_err() {
             // println!("error: {err}");
@@ -818,7 +834,7 @@ mod tests {
             }));
             Ok(())
         })
-            .unwrap();
+        .unwrap();
 
         if let DBSPError::Runtime(err) = handle.step().unwrap_err() {
             // println!("error: {err}");
@@ -844,7 +860,7 @@ mod tests {
             circuit.add_source(Generator::new(|| 5usize));
             Ok(())
         })
-            .unwrap();
+        .unwrap();
 
         handle.enable_cpu_profiler().unwrap();
         handle.step().unwrap();
@@ -870,7 +886,7 @@ mod tests {
             circuit.add_source(Generator::new(|| 5usize));
             Ok(())
         })
-            .unwrap();
+        .unwrap();
 
         handle.step().unwrap();
     }
@@ -905,7 +921,7 @@ mod tests {
             stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
             Ok(handle)
         })
-            .unwrap();
+        .unwrap();
 
         let cid = dbsp.commit().expect("commit failed");
         eprintln!(" === cid={:?} ===", cid);
@@ -943,5 +959,53 @@ mod tests {
         let _r = dbsp.gc_checkpoint();
         let _r = dbsp.gc_checkpoint();
         let _r = dbsp.gc_checkpoint();
+    }
+
+    #[test]
+    fn commit_restore() {
+        use crate::utils::Tup2;
+        let _r = env_logger::try_init();
+        let temp = tempdir().expect("Can't create temp dir for storage");
+        let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
+            vec![(1, Tup2(1, 1))],
+            vec![(2, Tup2(2, 2))],
+            vec![(3, Tup2(3, 3))],
+            vec![(4, Tup2(4, 4))],
+            vec![(5, Tup2(5, 5))],
+            vec![(6, Tup2(6, 6))],
+            vec![(7, Tup2(7, 7))],
+            vec![(8, Tup2(8, 8))],
+        ];
+
+        for i in 0..batches.len() {
+            let cconf = CircuitConfig {
+                layout: Layout::new_solo(1),
+                storage: Some(temp.path().to_str().unwrap().to_string()),
+                init_checkpoint: i as u64,
+            };
+
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) =
+                Runtime::init_circuit(&cconf, move |circuit| {
+                    let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+                    let (sample_size_stream, sample_size_handle) =
+                        circuit.add_input_stream::<usize>();
+                    let sample_handle = stream
+                        .integrate_trace()
+                        .stream_sample_keys(&sample_size_stream)
+                        .output();
+                    Ok((handle, sample_handle, sample_size_handle))
+                })
+                .unwrap();
+
+            let batches = batches[0..i + 1].to_vec();
+            for mut batch in batches {
+                sample_size_handle.set_for_all(25usize);
+                input_handle.append(&mut batch);
+                dbsp.step().unwrap();
+                let cid = dbsp.commit().expect("commit failed");
+                eprintln!(" === cid={:?} done ===", cid);
+                println!("output_handle={:?}", output_handle.take_from_all());
+            }
+        }
     }
 }

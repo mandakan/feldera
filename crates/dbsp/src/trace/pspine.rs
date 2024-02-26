@@ -708,6 +708,7 @@ where
         persistent_id: S,
         sid: u64,
     ) -> Self {
+        eprintln!("calling from_step_id {sid}");
         let mut spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()), sid);
 
         if sid > 0 {
@@ -722,8 +723,9 @@ where
             spine.lower_key_bound = committed.lower_key_bound;
             spine.key_filter = None; //committed.key_filter;
             spine.value_filter = None; //committed.value_filter;
-
+            eprintln!("Loaded spine from step {sid}");
             for batch in committed.batches {
+                eprintln!("reinsert batch {batch} from step");
                 let batch = B::from_path(&batch).unwrap();
                 spine.insert(batch);
             }
@@ -855,7 +857,8 @@ where
         let committed: CommittedSpine<B> = self.into();
         let as_bytes =
             feldera_storage::file::to_bytes(&committed).expect("failed to serialize spine data");
-        std::fs::write(cspine_path, as_bytes).expect("failed to write spine data");
+        std::fs::write(&cspine_path, as_bytes).expect("failed to write spine data");
+        eprintln!("Committed spine to {}", cspine_path.display());
 
         // Write the batches as a separate file, this allows to parse this again e.g.,
         // in `Runtime` without the need to know the exact Spine type.
@@ -949,15 +952,11 @@ where
         mut effort: usize,
         activator: Option<Activator>,
         persistent_id: String,
-        sid: u64,
+        _sid: u64,
     ) -> Self {
         // Zero effort is .. not smart.
         if effort == 0 {
             effort = 1;
-        }
-
-        if sid > 0 {
-            todo!("do things")
         }
 
         Spine {
