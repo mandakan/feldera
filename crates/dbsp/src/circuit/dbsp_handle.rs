@@ -657,15 +657,41 @@ impl DBSPHandle {
             );
 
             for remove in to_remove.iter() {
-                eprintln!("removing file {}", remove);
                 match fs::remove_file(remove) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        eprintln!("removed file {}", remove);
+                    }
                     Err(e) => {
                         log::error!(
                             "Unable to remove old-checkpoint data-file {}: {}",
                             remove,
                             e
                         );
+                    }
+                }
+            }
+
+            if let Some(rt) = self.runtime.as_ref() {
+                let entries = fs::read_dir(rt.runtime().storage_path())?;
+                for entry in entries {
+                    let entry = entry?;
+                    let path = entry.path();
+                    let file_name = path.file_name().unwrap().to_string_lossy();
+                    if file_name.starts_with(&format!("pspine-batches-{}", cp_to_remove))
+                        || file_name.starts_with(&format!("pspine-{}", cp_to_remove))
+                    {
+                        match fs::remove_file(&path) {
+                            Ok(_) => {
+                                eprintln!("removed file {:?}", path.display())
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Unable to remove old-checkpoint meta-data file {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -753,7 +779,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::circuit::{CircuitConfig, Layout};
-    use crate::{operator::Generator, Circuit, Error as DBSPError, Runtime, RuntimeError};
+    use crate::trace::ord::VecZSet;
+    use crate::{
+        operator::Generator, Circuit, CollectionHandle, DBSPHandle, Error as DBSPError,
+        InputHandle, OutputHandle, Runtime, RuntimeError,
+    };
     use anyhow::anyhow;
     use tempfile::tempdir;
 
@@ -900,13 +930,35 @@ mod tests {
     }
 
     #[test]
-    fn test_commit() {
+    fn gc_commits() {
         use crate::{utils::Tup2, Runtime, Stream};
         use std::cmp::max;
+        use std::fs;
+        use std::io;
+        use std::path::Path;
+        let temp = tempdir().expect("Can't create temp dir for storage");
+        let cconf = CircuitConfig {
+            layout: Layout::new_solo(1),
+            storage: Some(temp.path().to_str().unwrap().to_string()),
+            init_checkpoint: 0,
+        };
+
+        fn count_files_in_directory<P: AsRef<Path>>(path: P) -> io::Result<usize> {
+            let mut file_count = 0;
+            let entries = fs::read_dir(path)?;
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    file_count += 1;
+                }
+            }
+            Ok(file_count)
+        }
 
         let _r = env_logger::try_init();
 
-        let (mut dbsp, input_handle) = Runtime::init_circuit(1, move |circuit| {
+        let (mut dbsp, input_handle) = Runtime::init_circuit(cconf, move |circuit| {
             let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
             let stream = stream.shard();
             let watermark: Stream<_, (i32, i32)> = stream.waterline(
@@ -955,10 +1007,14 @@ mod tests {
         }
 
         eprintln!("list_checkpoints={:?}", dbsp.list_checkpoints());
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
-        let _r = dbsp.gc_checkpoint();
+        let mut prev_count = count_files_in_directory(temp.path()).unwrap();
+        for _i in 0..4 {
+            let _r = dbsp.gc_checkpoint();
+            let count = count_files_in_directory(temp.path()).unwrap();
+            eprintln!("count={:?} prev_count={:?}", count, prev_count);
+            assert!(count <= prev_count);
+            prev_count = count;
+        }
     }
 
     #[test]
@@ -967,45 +1023,92 @@ mod tests {
         let _r = env_logger::try_init();
         let temp = tempdir().expect("Can't create temp dir for storage");
         let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
-            vec![(1, Tup2(1, 1))],
-            vec![(2, Tup2(2, 2))],
-            vec![(3, Tup2(3, 3))],
-            vec![(4, Tup2(4, 4))],
-            vec![(5, Tup2(5, 5))],
-            vec![(6, Tup2(6, 6))],
-            vec![(7, Tup2(7, 7))],
-            vec![(8, Tup2(8, 8))],
+            vec![(1, Tup2(2, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(5, Tup2(6, 1))],
+            vec![(7, Tup2(8, 1))],
+            vec![(9, Tup2(10, 1))],
         ];
+        const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
+        let mut committed = vec![];
 
-        for i in 0..batches.len() {
+        #[allow(clippy::type_complexity)]
+        fn mkcircuit(
+            cconf: &CircuitConfig,
+        ) -> (
+            DBSPHandle,
+            (
+                CollectionHandle<i32, Tup2<i32, i32>>,
+                OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
+                InputHandle<usize>,
+            ),
+        ) {
+            Runtime::init_circuit(cconf, move |circuit| {
+                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+                let sample_handle = stream
+                    .integrate_trace()
+                    .stream_sample_unique_key_vals(&sample_size_stream)
+                    .output();
+                Ok((handle, sample_handle, sample_size_handle))
+            })
+            .unwrap()
+        }
+
+        {
+            let cconf = CircuitConfig {
+                layout: Layout::new_solo(1),
+                storage: Some(temp.path().to_str().unwrap().to_string()),
+                init_checkpoint: 0,
+            };
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
+
+            for i in 0..batches.len() {
+                let mut batches_to_insert = batches.clone();
+
+                sample_size_handle.set_for_all(SAMPLE_SIZE);
+                input_handle.append(&mut batches_to_insert[i]);
+                dbsp.step().unwrap();
+                let cid = dbsp.commit().expect("commit failed");
+                eprintln!(" === cid={:?} commit ===", cid);
+                let res = output_handle.take_from_all();
+
+                let mut keys = vec![];
+                let mut diffs = vec![];
+                for batch in batches[0..i + 1].iter() {
+                    assert_eq!(batch.len(), 1);
+                    let (k, Tup2(v, r)) = batch[0];
+                    keys.push(Tup2(k, v));
+                    diffs.push(r);
+                }
+                let expected_zset = VecZSet::from_columns(keys, diffs);
+                committed.push(expected_zset.clone());
+                assert_eq!(expected_zset, res[0]);
+                eprintln!(
+                    " - cid={cid} expected_zset={:?} res[0]={:?}",
+                    expected_zset, res[0]
+                );
+            }
+        }
+
+        for i in 1..batches.len() {
             let cconf = CircuitConfig {
                 layout: Layout::new_solo(1),
                 storage: Some(temp.path().to_str().unwrap().to_string()),
                 init_checkpoint: i as u64,
             };
 
-            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) =
-                Runtime::init_circuit(&cconf, move |circuit| {
-                    let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-                    let (sample_size_stream, sample_size_handle) =
-                        circuit.add_input_stream::<usize>();
-                    let sample_handle = stream
-                        .integrate_trace()
-                        .stream_sample_keys(&sample_size_stream)
-                        .output();
-                    Ok((handle, sample_handle, sample_size_handle))
-                })
-                .unwrap();
+            let (mut dbsp, (_input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
+            sample_size_handle.set_for_all(SAMPLE_SIZE);
+            dbsp.step().unwrap();
 
-            let batches = batches[0..i + 1].to_vec();
-            for mut batch in batches {
-                sample_size_handle.set_for_all(25usize);
-                input_handle.append(&mut batch);
-                dbsp.step().unwrap();
-                let cid = dbsp.commit().expect("commit failed");
-                eprintln!(" === cid={:?} done ===", cid);
-                println!("output_handle={:?}", output_handle.take_from_all());
-            }
+            let res = output_handle.take_from_all();
+            let expected_zset = committed[i - 1].clone();
+            eprintln!(
+                " - i={i} expected_zset={:?} res[0]={:?}",
+                expected_zset, res[0]
+            );
+            assert_eq!(expected_zset, res[0]);
         }
     }
 }
