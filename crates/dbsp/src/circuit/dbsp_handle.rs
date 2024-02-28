@@ -6,14 +6,13 @@ use anyhow::Error as AnyError;
 use core::fmt;
 use crossbeam::channel::{bounded, Receiver, Select, Sender, TryRecvError};
 use itertools::Either;
-use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use rkyv::Deserialize;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     error::Error as StdError,
     fmt::{Debug, Display, Error as FmtError, Formatter},
-    fs,
-    fs::create_dir_all,
+    fs::{self, create_dir_all, File},
+    io::Write,
     iter::empty,
     net::SocketAddr,
     ops::Range,
@@ -30,7 +29,7 @@ use super::runtime::WorkerPanicInfo;
 
 /// A host for some workers in the [`Layout`] for a multi-host DBSP circuit.
 #[allow(clippy::manual_non_exhaustive)]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Host {
     /// The IP address and TCP port on which the host listens and to which the
     /// other hosts connect.
@@ -56,7 +55,7 @@ impl Debug for Host {
 }
 
 /// How a DBSP circuit is laid out across one or more machines.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Layout {
     /// A layout whose workers run on a single host.
     Solo {
@@ -496,18 +495,28 @@ pub struct DBSPHandle {
 }
 
 impl DBSPHandle {
+    /// We keep at least this many checkpoints around.
+    const MIN_CHECKPOINT_THRESHOLD: usize = 2;
+    /// Name of the checkpoint list file.
+    ///
+    /// File will be stored inside the runtime storage directory with this
+    /// name.
+    const CHECKPOINT_FILE_NAME: &'static str = "checkpoints.feldera";
+
     fn new(
         runtime: RuntimeHandle,
         command_senders: Vec<Sender<Command>>,
         status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     ) -> Self {
+        let storage_path = runtime.runtime().storage_path();
         Self {
             start_time: Instant::now(),
             runtime: Some(runtime),
             command_senders,
             status_receivers,
             step_id: 0,
-            checkpoint_list: VecDeque::new(),
+            checkpoint_list: DBSPHandle::try_read_checkpoints_from_file(storage_path)
+                .expect("failed to read checkpoint list from file"),
         }
     }
 
@@ -589,6 +598,43 @@ impl DBSPHandle {
         self.broadcast_command(Command::Step, |_, _| {})
     }
 
+    fn try_read_checkpoints_from_file<P: AsRef<Path>>(
+        storage_path: P,
+    ) -> Result<VecDeque<u64>, DBSPError> {
+        let checkpoint_file_path = storage_path
+            .as_ref()
+            .to_path_buf()
+            .join(Self::CHECKPOINT_FILE_NAME);
+        if !checkpoint_file_path.exists() {
+            return Ok(VecDeque::new());
+        }
+        let content = fs::read(checkpoint_file_path).expect("Checkpoint file should exists.");
+        let archived = unsafe { rkyv::archived_root::<VecDeque<u64>>(&content) };
+        let checkpoint_list: VecDeque<u64> = archived.deserialize(&mut rkyv::Infallible).unwrap();
+        Ok(checkpoint_list)
+    }
+
+    fn update_checkpoint_file(&self) -> Result<(), DBSPError> {
+        let checkpoint_file = self
+            .runtime
+            .as_ref()
+            .unwrap()
+            .runtime()
+            .storage_path()
+            .join(format!("{}{}", Self::CHECKPOINT_FILE_NAME, ".mut"));
+        eprintln!("checkpoint_file: {:?}", checkpoint_file);
+
+        // write checkpoint list to a file:
+        let as_bytes = feldera_storage::file::to_bytes(&self.checkpoint_list)
+            .expect("failed to serialize checkpoint-list data");
+        let mut f = File::create(&checkpoint_file)?;
+        f.write_all(as_bytes.as_slice())?;
+        f.sync_all()?;
+        fs::rename(&checkpoint_file, checkpoint_file.with_extension(""))?;
+
+        Ok(())
+    }
+
     /// Create a new checkpoint by taking consistent snapshot of the state in
     /// dbsp.
     ///
@@ -602,6 +648,8 @@ impl DBSPHandle {
         // worker threads. The `handler` seemed awkward to use so I ignored it for now.
 
         self.checkpoint_list.push_back(self.step_id);
+        self.update_checkpoint_file()?;
+
         Ok(self.step_id)
     }
 
@@ -632,15 +680,58 @@ impl DBSPHandle {
         Ok(batch_files_in_commit)
     }
 
+    /// Removes all the files in `files` from the storage.
+    fn remove_files<P: AsRef<Path>>(&self, files: &Vec<P>) -> Result<(), DBSPError> {
+        for file in files {
+            assert!(file.as_ref().is_file());
+            if let Some(rt) = self.runtime.as_ref() {
+                assert!(
+                    file.as_ref().starts_with(rt.runtime().storage_path()),
+                    "File {} is not in the storage directory",
+                    file.as_ref().display()
+                );
+            }
+            match fs::remove_file(&file) {
+                Ok(_) => {
+                    log::debug!("Removed file {}", file.as_ref().display());
+                }
+                Err(e) => {
+                    log::warn!("Unable to remove old-checkpoint file {}: {} (the pipeline will try to delete the file again on a restart)", file.as_ref().display(), e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes all meta-data files associated with the checkpoint given by
+    /// `commit_id`.
+    fn find_metadata_files(&self, commit_id: u64) -> Result<Vec<PathBuf>, DBSPError> {
+        let mut checkpoint_files = Vec::new();
+        if let Some(rt) = self.runtime.as_ref() {
+            let files = fs::read_dir(rt.runtime().storage_path())?;
+            for file in files {
+                let path = file?.path();
+                if let Some(file_name) = path.file_name() {
+                    let file_name = file_name.to_string_lossy();
+                    if file_name.starts_with(&format!("pspine-{}", commit_id))
+                        || file_name.starts_with(&format!("pspine-batches-{}", commit_id))
+                    {
+                        checkpoint_files.push(path);
+                    }
+                }
+            }
+        }
+        Ok(checkpoint_files)
+    }
+
     /// Remove the oldest checkpoint from the list.
     ///
     /// This method is a no-op if there are less than two checkpoints.
     pub fn gc_checkpoint(&mut self) -> Result<(), DBSPError> {
-        const MIN_CHECKPOINT_THRESHOLD: usize = 2;
         // Ensures that we can unwrap call to pop_front, and front:
-        static_assertions::const_assert!(MIN_CHECKPOINT_THRESHOLD >= 2);
+        static_assertions::const_assert!(DBSPHandle::MIN_CHECKPOINT_THRESHOLD >= 2);
 
-        if self.checkpoint_list.len() > MIN_CHECKPOINT_THRESHOLD {
+        if self.checkpoint_list.len() > DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
             let cp_to_remove = self.checkpoint_list.pop_front().unwrap();
             let next_to_remove = *self.checkpoint_list.front().unwrap();
 
@@ -649,6 +740,7 @@ impl DBSPHandle {
 
             let to_remove = potentially_remove
                 .difference(&need_to_keep)
+                .map(PathBuf::from)
                 .collect::<Vec<_>>();
 
             eprintln!(
@@ -656,45 +748,8 @@ impl DBSPHandle {
                 cp_to_remove, potentially_remove, need_to_keep, to_remove
             );
 
-            for remove in to_remove.iter() {
-                match fs::remove_file(remove) {
-                    Ok(_) => {
-                        eprintln!("removed file {}", remove);
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Unable to remove old-checkpoint data-file {}: {}",
-                            remove,
-                            e
-                        );
-                    }
-                }
-            }
-
-            if let Some(rt) = self.runtime.as_ref() {
-                let entries = fs::read_dir(rt.runtime().storage_path())?;
-                for entry in entries {
-                    let entry = entry?;
-                    let path = entry.path();
-                    let file_name = path.file_name().unwrap().to_string_lossy();
-                    if file_name.starts_with(&format!("pspine-batches-{}", cp_to_remove))
-                        || file_name.starts_with(&format!("pspine-{}", cp_to_remove))
-                    {
-                        match fs::remove_file(&path) {
-                            Ok(_) => {
-                                eprintln!("removed file {:?}", path.display())
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "Unable to remove old-checkpoint meta-data file {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.remove_files(&to_remove)?;
+            self.remove_files(&self.find_metadata_files(cp_to_remove)?)?;
         }
         Ok(())
     }
@@ -776,10 +831,12 @@ impl Drop for DBSPHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::time::Duration;
 
     use crate::circuit::{CircuitConfig, Layout};
     use crate::trace::ord::VecZSet;
+    use crate::utils::Tup2;
     use crate::{
         operator::Generator, Circuit, CollectionHandle, DBSPHandle, Error as DBSPError,
         InputHandle, OutputHandle, Runtime, RuntimeError,
@@ -929,6 +986,55 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
+    fn mkcircuit(
+        cconf: &CircuitConfig,
+    ) -> (
+        DBSPHandle,
+        (
+            CollectionHandle<i32, Tup2<i32, i32>>,
+            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
+            InputHandle<usize>,
+        ),
+    ) {
+        Runtime::init_circuit(cconf, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let sample_handle = stream
+                .integrate_trace()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            Ok((handle, sample_handle, sample_size_handle))
+        })
+        .unwrap()
+    }
+
+    /// If we call commit, we should preserve the checkpoint list across circuit
+    /// restarts.
+    #[test]
+    fn checkpoint_file() {
+        let temp = tempdir().expect("Can't create temp dir for storage");
+        let cconf = CircuitConfig {
+            layout: Layout::new_solo(1),
+            storage: Some(temp.path().to_str().unwrap().to_string()),
+            init_checkpoint: 0,
+        };
+
+        {
+            let (mut dbsp, (_input_handle, _output_handle, sample_size_handle)) = mkcircuit(&cconf);
+            sample_size_handle.set_for_all(2);
+            dbsp.step().unwrap();
+            dbsp.commit().expect("commit failed");
+        }
+
+        {
+            let (dbsp, _) = mkcircuit(&cconf);
+            assert_eq!(dbsp.checkpoint_list, VecDeque::from(vec![1]));
+        }
+    }
+
+    /// Checks that we end up cleaning old checkpoints on disk after calling
+    /// `gc_checkpoint`.
     #[test]
     fn gc_commits() {
         use crate::{utils::Tup2, Runtime, Stream};
@@ -1008,15 +1114,21 @@ mod tests {
 
         eprintln!("list_checkpoints={:?}", dbsp.list_checkpoints());
         let mut prev_count = count_files_in_directory(temp.path()).unwrap();
-        for _i in 0..4 {
+        let num_checkpoints = dbsp.list_checkpoints().unwrap().len();
+        for _i in 0..num_checkpoints - DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
             let _r = dbsp.gc_checkpoint();
             let count = count_files_in_directory(temp.path()).unwrap();
             eprintln!("count={:?} prev_count={:?}", count, prev_count);
-            assert!(count <= prev_count);
+            assert!(count < prev_count);
             prev_count = count;
         }
+        // this might change if the spine implementation changes:
+        assert_eq!(prev_count, 9, "9 files left");
     }
 
+    /// Checks that we can restore the state of a circuit to a previous
+    /// checkpoint and that the state is consistent with what we would
+    /// expect it to be at that point.
     #[test]
     fn commit_restore() {
         use crate::utils::Tup2;
@@ -1032,29 +1144,8 @@ mod tests {
         const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
         let mut committed = vec![];
 
-        #[allow(clippy::type_complexity)]
-        fn mkcircuit(
-            cconf: &CircuitConfig,
-        ) -> (
-            DBSPHandle,
-            (
-                CollectionHandle<i32, Tup2<i32, i32>>,
-                OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
-                InputHandle<usize>,
-            ),
-        ) {
-            Runtime::init_circuit(cconf, move |circuit| {
-                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-                let sample_handle = stream
-                    .integrate_trace()
-                    .stream_sample_unique_key_vals(&sample_size_stream)
-                    .output();
-                Ok((handle, sample_handle, sample_size_handle))
-            })
-            .unwrap()
-        }
-
+        // We create a circuit and push data into it, we also take a checkpoint at very
+        // step
         {
             let cconf = CircuitConfig {
                 layout: Layout::new_solo(1),
@@ -1069,8 +1160,7 @@ mod tests {
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
                 input_handle.append(&mut batches_to_insert[i]);
                 dbsp.step().unwrap();
-                let cid = dbsp.commit().expect("commit failed");
-                eprintln!(" === cid={:?} commit ===", cid);
+                let _cid = dbsp.commit().expect("commit failed");
                 let res = output_handle.take_from_all();
 
                 let mut keys = vec![];
@@ -1084,13 +1174,11 @@ mod tests {
                 let expected_zset = VecZSet::from_columns(keys, diffs);
                 committed.push(expected_zset.clone());
                 assert_eq!(expected_zset, res[0]);
-                eprintln!(
-                    " - cid={cid} expected_zset={:?} res[0]={:?}",
-                    expected_zset, res[0]
-                );
             }
         }
 
+        // Next, we instantiate every checkpoint and make sure the circuit state is
+        // what we would expect it to be at the given point we restored it to
         for i in 1..batches.len() {
             let cconf = CircuitConfig {
                 layout: Layout::new_solo(1),
@@ -1104,10 +1192,6 @@ mod tests {
 
             let res = output_handle.take_from_all();
             let expected_zset = committed[i - 1].clone();
-            eprintln!(
-                " - i={i} expected_zset={:?} res[0]={:?}",
-                expected_zset, res[0]
-            );
             assert_eq!(expected_zset, res[0]);
         }
     }
