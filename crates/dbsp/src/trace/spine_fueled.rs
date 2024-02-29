@@ -105,6 +105,7 @@ use std::{
     mem::replace,
 };
 use textwrap::indent;
+use uuid::Uuid;
 
 use super::Filter;
 
@@ -662,12 +663,12 @@ where
         Self::with_effort(1, activator)
     }
 
-    fn from_step_id<S: AsRef<str>>(
+    fn from_commit_id<S: AsRef<str>>(
         activator: Option<Activator>,
+        cid: Uuid,
         _persistent_id: S,
-        sid: u64,
     ) -> Self {
-        assert_eq!(sid, 0, "This type doesn't support checkpoints");
+        assert_eq!(cid, Uuid::nil(), "This type doesn't support checkpoints");
         Self::with_effort(1, activator)
     }
 

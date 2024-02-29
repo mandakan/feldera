@@ -16,6 +16,7 @@ use crate::{
 use crate::{DBTimestamp, IndexedZSet};
 use size_of::SizeOf;
 use std::{borrow::Cow, cell::RefCell, marker::PhantomData, ops::DerefMut, rc::Rc};
+use uuid::Uuid;
 
 circuit_cache_key!(TraceId<B, D, K, V>(GlobalNodeId => (Stream<B, D>, TraceBounds<K, V>)));
 circuit_cache_key!(DelayedTraceId<B, D>(GlobalNodeId => Stream<B, D>));
@@ -946,8 +947,8 @@ where
         if scope == 0 && self.trace.is_none() {
             // TODO: use T::with_effort with configurable effort?
             let rt = Runtime::runtime();
-            let cid = rt.map_or_else(|| 0, |rt| rt.start_checkpoint());
-            self.trace = Some(T::from_step_id(None, &self.persistent_id, cid));
+            let cid = rt.map_or_else(|| Uuid::nil(), |rt| rt.start_checkpoint());
+            self.trace = Some(T::from_commit_id(None, cid, &self.persistent_id));
         }
     }
 
@@ -986,7 +987,7 @@ where
         !self.dirty[scope as usize]
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         self.trace
             .as_ref()
             .map(|trace| trace.commit(cid))

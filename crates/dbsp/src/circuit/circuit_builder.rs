@@ -67,6 +67,7 @@ use std::{
     thread::panicking,
 };
 use typedmap::{TypedMap, TypedMapKey};
+use uuid::Uuid;
 
 /// Value stored in the stream.
 struct StreamValue<D> {
@@ -793,7 +794,7 @@ pub trait Node {
 
     /// Instructs the node to commit the state of its inner operator to
     /// persistent storage.
-    fn commit(&self, cid: u64) -> Result<(), DBSPError>;
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError>;
 }
 
 /// Id of an operator, guaranteed to be unique within a circuit.
@@ -3184,7 +3185,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), DBSPError> {
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError> {
         self.operator.commit(cid)
     }
 }
@@ -3264,7 +3265,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), DBSPError> {
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError> {
         self.operator.commit(cid)
     }
 }
@@ -3350,7 +3351,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), DBSPError> {
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError> {
         self.operator.commit(cid)
     }
 }
@@ -3429,7 +3430,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), DBSPError> {
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError> {
         self.operator.commit(cid)
     }
 }
@@ -3528,7 +3529,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), DBSPError> {
+    fn commit(&self, cid: Uuid) -> Result<(), DBSPError> {
         self.operator.commit(cid)
     }
 }
@@ -3647,7 +3648,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         self.operator.commit(cid)
     }
 }
@@ -3770,7 +3771,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         self.operator.commit(cid)
     }
 }
@@ -3911,7 +3912,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         self.operator.commit(cid)
     }
 }
@@ -4037,7 +4038,7 @@ where
         self.operator.fixedpoint(scope)
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         self.operator.commit(cid)
     }
 }
@@ -4145,7 +4146,7 @@ where
         unsafe { (*self.operator.get()).fixedpoint(scope) }
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
         unsafe { (*self.operator.get()).commit(cid) }
     }
 }
@@ -4225,7 +4226,7 @@ where
         unsafe { (*self.operator.get()).fixedpoint(scope) }
     }
 
-    fn commit(&self, _cid: u64) -> Result<(), Error> {
+    fn commit(&self, _cid: Uuid) -> Result<(), Error> {
         // The Z-1 operator consists of two logical parts.
         // The first part gets invoked at the start of a clock cycle to retrieve the
         // state stored at the previous clock tick. The second one gets invoked
@@ -4378,7 +4379,7 @@ where
         self.circuit.map_nodes_recursive(f);
     }
 
-    fn commit(&self, _cid: u64) -> Result<(), Error> {
+    fn commit(&self, _cid: Uuid) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -4428,7 +4429,7 @@ impl CircuitHandle {
         self.executor.run(&self.circuit)
     }
 
-    pub fn commit(&mut self, cid: u64) -> Result<(), SchedulerError> {
+    pub fn commit(&mut self, cid: Uuid) -> Result<(), SchedulerError> {
         self.circuit.map_nodes_recursive(&mut |node: &dyn Node| {
             node.commit(cid).expect("committed");
         });

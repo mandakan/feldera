@@ -6,7 +6,7 @@ use anyhow::Error as AnyError;
 use core::fmt;
 use crossbeam::channel::{bounded, Receiver, Select, Sender, TryRecvError};
 use itertools::Either;
-use rkyv::Deserialize;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
     error::Error as StdError,
@@ -20,6 +20,7 @@ use std::{
     thread::Result as ThreadResult,
     time::Instant,
 };
+use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::circuit::circuit_builder::Stream;
@@ -46,7 +47,7 @@ pub struct Host {
 }
 
 impl Debug for Host {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Host")
             .field("address", &self.address)
             .field("workers", &self.workers)
@@ -89,7 +90,7 @@ impl Layout {
     /// To execute such a multihost circuit, one must create a `Runtime` for it
     /// on every host in `params`, passing the same `params` in each case.  Each
     /// host must pass its own `local_address`.  The `Runtime` on each host
-    /// listens on its own address and connects to all of the other addresses.
+    /// listens on its own address and connects to all the other addresses.
     pub fn new_multihost(
         params: &Vec<(SocketAddr, usize)>,
         local_address: SocketAddr,
@@ -210,7 +211,7 @@ impl StdError for LayoutError {}
 pub struct CircuitConfig {
     pub layout: Layout,
     pub storage: Option<String>,
-    pub init_checkpoint: u64,
+    pub init_checkpoint: Uuid,
 }
 
 impl CircuitConfig {
@@ -218,7 +219,7 @@ impl CircuitConfig {
         Self {
             layout: Layout::new_solo(n),
             storage: None,
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         }
     }
 }
@@ -232,7 +233,7 @@ impl IntoCircuitConfig for &CircuitConfig {
         self.storage.clone()
     }
 
-    fn start_checkpoint(&self) -> u64 {
+    fn start_checkpoint(&self) -> Uuid {
         self.init_checkpoint
     }
 }
@@ -246,7 +247,7 @@ impl IntoCircuitConfig for CircuitConfig {
         self.storage.clone()
     }
 
-    fn start_checkpoint(&self) -> u64 {
+    fn start_checkpoint(&self) -> Uuid {
         self.init_checkpoint
     }
 }
@@ -260,8 +261,8 @@ pub trait IntoCircuitConfig {
         None
     }
 
-    fn start_checkpoint(&self) -> u64 {
-        0
+    fn start_checkpoint(&self) -> Uuid {
+        Uuid::nil()
     }
 }
 
@@ -469,7 +470,7 @@ enum Command {
     EnableProfiler,
     DumpProfile,
     RetrieveProfile,
-    Commit(u64),
+    Commit(Uuid),
 }
 
 enum Response {
@@ -477,6 +478,18 @@ enum Response {
     ProfileDump(String),
     Profile(WorkerProfile),
     CheckpointCreated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Archive)]
+pub struct CheckpointMetadata {
+    /// A unique identifier for the given checkpoint.
+    ///
+    /// This is used to identify the checkpoint in the file-system hierarchy.
+    pub uuid: Uuid,
+    /// An optional, user-defined name for the checkpoint.
+    pub identifier: Option<String>,
+    /// Which step the circuit was executing when the checkpoint was created.
+    pub step_id: u64,
 }
 
 /// A handle to control the execution of a circuit in a multithreaded runtime.
@@ -491,7 +504,8 @@ pub struct DBSPHandle {
     // workers.
     status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     step_id: u64,
-    checkpoint_list: VecDeque<u64>,
+    storage_path: PathBuf,
+    checkpoint_list: VecDeque<CheckpointMetadata>,
 }
 
 impl DBSPHandle {
@@ -509,14 +523,16 @@ impl DBSPHandle {
         status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     ) -> Self {
         let storage_path = runtime.runtime().storage_path();
+        let checkpoint_list = Self::try_read_checkpoints_from_file(&storage_path)
+            .expect("failed to read checkpoint list from file");
         Self {
             start_time: Instant::now(),
             runtime: Some(runtime),
             command_senders,
             status_receivers,
             step_id: 0,
-            checkpoint_list: DBSPHandle::try_read_checkpoints_from_file(storage_path)
-                .expect("failed to read checkpoint list from file"),
+            storage_path,
+            checkpoint_list,
         }
     }
 
@@ -600,7 +616,7 @@ impl DBSPHandle {
 
     fn try_read_checkpoints_from_file<P: AsRef<Path>>(
         storage_path: P,
-    ) -> Result<VecDeque<u64>, DBSPError> {
+    ) -> Result<VecDeque<CheckpointMetadata>, DBSPError> {
         let checkpoint_file_path = storage_path
             .as_ref()
             .to_path_buf()
@@ -609,19 +625,16 @@ impl DBSPHandle {
             return Ok(VecDeque::new());
         }
         let content = fs::read(checkpoint_file_path).expect("Checkpoint file should exists.");
-        let archived = unsafe { rkyv::archived_root::<VecDeque<u64>>(&content) };
-        let checkpoint_list: VecDeque<u64> = archived.deserialize(&mut rkyv::Infallible).unwrap();
+        let archived = unsafe { rkyv::archived_root::<VecDeque<CheckpointMetadata>>(&content) };
+        let checkpoint_list: VecDeque<CheckpointMetadata> =
+            archived.deserialize(&mut rkyv::Infallible).unwrap();
         Ok(checkpoint_list)
     }
 
     fn update_checkpoint_file(&self) -> Result<(), DBSPError> {
-        let checkpoint_file = self
-            .runtime
-            .as_ref()
-            .unwrap()
-            .runtime()
-            .storage_path()
-            .join(format!("{}{}", Self::CHECKPOINT_FILE_NAME, ".mut"));
+        let checkpoint_file =
+            self.storage_path
+                .join(format!("{}{}", Self::CHECKPOINT_FILE_NAME, ".mut"));
         eprintln!("checkpoint_file: {:?}", checkpoint_file);
 
         // write checkpoint list to a file:
@@ -637,33 +650,55 @@ impl DBSPHandle {
 
     /// Create a new checkpoint by taking consistent snapshot of the state in
     /// dbsp.
-    ///
-    /// ## Returns
-    /// The ID of the new checkpoint.
-    pub fn commit(&mut self) -> Result<u64, DBSPError> {
-        self.broadcast_command(Command::Commit(self.step_id), |_, _| {})?;
+    pub fn commit(&mut self) -> Result<CheckpointMetadata, DBSPError> {
+        self.commit_as(Uuid::now_v7(), None)
+    }
+
+    /// Create a new named checkpoint by taking consistent snapshot of the state
+    /// in dbsp.
+    pub fn commit_named(&mut self, name: String) -> Result<CheckpointMetadata, DBSPError> {
+        self.commit_as(Uuid::now_v7(), Some(name))
+    }
+
+    fn commit_as(
+        &mut self,
+        uuid: Uuid,
+        identifier: Option<String>,
+    ) -> Result<CheckpointMetadata, DBSPError> {
+        let commit_dir = self.storage_path.join(uuid.to_string());
+        create_dir_all(commit_dir)?;
+
+        self.broadcast_command(Command::Commit(uuid), |_, _| {})?;
         // TODO: I think broadcast_command is synchronous, we can just return
         // `self.step_id` directly.
         // TODO: we need to handle the case where the commit fails in one of the
         // worker threads. The `handler` seemed awkward to use so I ignored it for now.
 
-        self.checkpoint_list.push_back(self.step_id);
+        let md = CheckpointMetadata {
+            uuid,
+            identifier,
+            step_id: self.step_id,
+        };
+        self.checkpoint_list.push_back(md.clone());
         self.update_checkpoint_file()?;
 
-        Ok(self.step_id)
+        Ok(md)
     }
 
     /// List all currently available checkpoints.
-    pub fn list_checkpoints(&mut self) -> Result<Vec<u64>, DBSPError> {
+    pub fn list_checkpoints(&mut self) -> Result<Vec<CheckpointMetadata>, DBSPError> {
         Ok(self.checkpoint_list.clone().into())
     }
 
-    fn gather_batches_for_checkpoint(&self, commit_id: u64) -> Result<HashSet<String>, DBSPError> {
+    fn gather_batches_for_checkpoint(
+        &self,
+        cpm: &CheckpointMetadata,
+    ) -> Result<HashSet<String>, DBSPError> {
+        assert_ne!(cpm.uuid, Uuid::nil());
         let mut batch_files_in_commit: HashSet<String> = HashSet::new();
-        let cp_spine_file_prefix = format!("pspine-batches-{}", commit_id);
+        let cp_spine_file_prefix = format!("pspine-batches-{}", cpm.uuid);
 
-        let storage = self.runtime.as_ref().unwrap().runtime().storage_path();
-        let files = fs::read_dir(storage)?;
+        let files = fs::read_dir(&self.storage_path)?;
         for file in files {
             let file = file?;
             let path = file.path();
@@ -680,18 +715,16 @@ impl DBSPHandle {
         Ok(batch_files_in_commit)
     }
 
-    /// Removes all the files in `files` from the storage.
-    fn remove_files<P: AsRef<Path>>(&self, files: &Vec<P>) -> Result<(), DBSPError> {
+    /// Removes all the files in `files` from the storage base directory.
+    fn remove_batch_files<P: AsRef<Path>>(&self, files: &Vec<P>) -> Result<(), DBSPError> {
         for file in files {
             assert!(file.as_ref().is_file());
-            if let Some(rt) = self.runtime.as_ref() {
-                assert!(
-                    file.as_ref().starts_with(rt.runtime().storage_path()),
-                    "File {} is not in the storage directory",
-                    file.as_ref().display()
-                );
-            }
-            match fs::remove_file(&file) {
+            assert!(
+                file.as_ref().starts_with(&self.storage_path),
+                "File {} is not in the storage directory",
+                file.as_ref().display()
+            );
+            match fs::remove_file(file) {
                 Ok(_) => {
                     log::debug!("Removed file {}", file.as_ref().display());
                 }
@@ -704,38 +737,43 @@ impl DBSPHandle {
     }
 
     /// Removes all meta-data files associated with the checkpoint given by
-    /// `commit_id`.
-    fn find_metadata_files(&self, commit_id: u64) -> Result<Vec<PathBuf>, DBSPError> {
-        let mut checkpoint_files = Vec::new();
-        if let Some(rt) = self.runtime.as_ref() {
-            let files = fs::read_dir(rt.runtime().storage_path())?;
-            for file in files {
-                let path = file?.path();
-                if let Some(file_name) = path.file_name() {
-                    let file_name = file_name.to_string_lossy();
-                    if file_name.starts_with(&format!("pspine-{}", commit_id))
-                        || file_name.starts_with(&format!("pspine-batches-{}", commit_id))
-                    {
-                        checkpoint_files.push(path);
-                    }
-                }
-            }
+    /// `cpm` by removing the folder associated with the checkpoint.
+    fn remove_checkpoint_dir(&self, cpm: &CheckpointMetadata) -> Result<(), DBSPError> {
+        assert_ne!(cpm.uuid, Uuid::nil());
+        let checkpoint_dir = self.storage_path.join(cpm.uuid.to_string());
+        if !checkpoint_dir.exists() {
+            log::warn!(
+                "Tried to remove a checkpoint directory {} that does not exist",
+                checkpoint_dir.display()
+            );
+            return Ok(());
         }
-        Ok(checkpoint_files)
+        fs::remove_dir_all(checkpoint_dir)?;
+        Ok(())
     }
 
     /// Remove the oldest checkpoint from the list.
     ///
-    /// This method is a no-op if there are less than two checkpoints.
-    pub fn gc_checkpoint(&mut self) -> Result<(), DBSPError> {
-        // Ensures that we can unwrap call to pop_front, and front:
+    /// # Returns
+    /// - Metadata of the removed checkpoint, if there are more than
+    ///   `MIN_CHECKPOINT_THRESHOLD`
+    /// - None otherwise.
+    pub fn gc_checkpoint(&mut self) -> Result<Option<CheckpointMetadata>, DBSPError> {
+        // Ensures that we can unwrap the call to pop_front, and front later:
         static_assertions::const_assert!(DBSPHandle::MIN_CHECKPOINT_THRESHOLD >= 2);
-
         if self.checkpoint_list.len() > DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
             let cp_to_remove = self.checkpoint_list.pop_front().unwrap();
-            let next_to_remove = *self.checkpoint_list.front().unwrap();
+            let next_to_remove = self.checkpoint_list.front().unwrap();
 
-            let potentially_remove = self.gather_batches_for_checkpoint(cp_to_remove)?;
+            // Update the checkpoint list file, we do this first intentionally, in case
+            // later operations fail we don't want the checkpoint list to
+            // contain a checkpoint that only has part of the files.
+            //
+            // If any of the later operations fail, restarting the circuit will try
+            // to remove the checkpoint files again (see also TODO).
+            self.update_checkpoint_file()?;
+
+            let potentially_remove = self.gather_batches_for_checkpoint(&cp_to_remove)?;
             let need_to_keep = self.gather_batches_for_checkpoint(next_to_remove)?;
 
             let to_remove = potentially_remove
@@ -745,13 +783,16 @@ impl DBSPHandle {
 
             eprintln!(
                 "cp_to_remove={} potentially_remove {:?} need_to_keep {:?} to_remove: {:?}",
-                cp_to_remove, potentially_remove, need_to_keep, to_remove
+                cp_to_remove.step_id, potentially_remove, need_to_keep, to_remove
             );
 
-            self.remove_files(&to_remove)?;
-            self.remove_files(&self.find_metadata_files(cp_to_remove)?)?;
+            self.remove_batch_files(&to_remove)?;
+            self.remove_checkpoint_dir(&cp_to_remove)?;
+
+            Ok(Some(cp_to_remove))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     /// Enable CPU profiler.
@@ -831,7 +872,6 @@ impl Drop for DBSPHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::time::Duration;
 
     use crate::circuit::{CircuitConfig, Layout};
@@ -843,6 +883,7 @@ mod tests {
     };
     use anyhow::anyhow;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     // Panic during initialization in worker thread.
     #[test]
@@ -1009,6 +1050,54 @@ mod tests {
         .unwrap()
     }
 
+    /*#[allow(clippy::type_complexity)]
+    fn mkcircuit2(
+        cconf: &CircuitConfig,
+    ) -> (
+        DBSPHandle,
+        (
+            CollectionHandle<i32, Tup2<i32, i32>>,
+            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
+            InputHandle<usize>,
+        ),
+    ) {
+        Runtime::init_circuit(cconf, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let sample_handle = stream
+                .integrate_trace_with_bound()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            Ok((handle, sample_handle, sample_size_handle))
+        })
+        .unwrap()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn mkcircuit3(
+        cconf: &CircuitConfig,
+    ) -> (
+        DBSPHandle,
+        (
+            CollectionHandle<i32, Tup2<i32, i32>>,
+            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
+            InputHandle<usize>,
+        ),
+    ) {
+        Runtime::init_circuit(cconf, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let sample_handle = stream
+                .integrate_trace_with_bound()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            // inspect trace, measure size
+
+            Ok((handle, sample_handle, sample_size_handle))
+        })
+        .unwrap()
+    }*/
+
     /// If we call commit, we should preserve the checkpoint list across circuit
     /// restarts.
     #[test]
@@ -1017,7 +1106,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(1),
             storage: Some(temp.path().to_str().unwrap().to_string()),
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
 
         {
@@ -1029,7 +1118,10 @@ mod tests {
 
         {
             let (dbsp, _) = mkcircuit(&cconf);
-            assert_eq!(dbsp.checkpoint_list, VecDeque::from(vec![1]));
+            let cpm = dbsp.checkpoint_list.front().unwrap();
+            assert_eq!(cpm.step_id, 1);
+            assert_ne!(cpm.uuid, Uuid::nil());
+            assert_eq!(cpm.identifier, None);
         }
     }
 
@@ -1046,18 +1138,15 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(1),
             storage: Some(temp.path().to_str().unwrap().to_string()),
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
 
-        fn count_files_in_directory<P: AsRef<Path>>(path: P) -> io::Result<usize> {
+        fn count_directory_entries<P: AsRef<Path>>(path: P) -> io::Result<usize> {
             let mut file_count = 0;
             let entries = fs::read_dir(path)?;
             for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    file_count += 1;
-                }
+                let _entry = entry?;
+                file_count += 1;
             }
             Ok(file_count)
         }
@@ -1082,8 +1171,6 @@ mod tests {
         .unwrap();
 
         let cid = dbsp.commit().expect("commit failed");
-        eprintln!(" === cid={:?} ===", cid);
-
         let batches: Vec<Vec<((i32, i32), i32)>> = vec![
             vec![((1, 2), 1)],
             vec![((2, 3), 1)],
@@ -1095,7 +1182,6 @@ mod tests {
             vec![((3, 4), 1)],
         ];
         for batches in batches.chunks(2) {
-            eprintln!(" === starting new iteration ===");
             let mut tuples = batches
                 .iter()
                 .map(|batch| {
@@ -1108,22 +1194,18 @@ mod tests {
             input_handle.append(&mut tuples[0]);
             input_handle.append(&mut tuples[1]);
             dbsp.step().unwrap();
-            let cid = dbsp.commit().expect("commit failed");
-            eprintln!(" === cid={:?} done ===", cid);
+            let cpm = dbsp.commit().expect("commit failed");
         }
 
-        eprintln!("list_checkpoints={:?}", dbsp.list_checkpoints());
-        let mut prev_count = count_files_in_directory(temp.path()).unwrap();
+        let mut prev_count = count_directory_entries(temp.path()).unwrap();
         let num_checkpoints = dbsp.list_checkpoints().unwrap().len();
         for _i in 0..num_checkpoints - DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
             let _r = dbsp.gc_checkpoint();
-            let count = count_files_in_directory(temp.path()).unwrap();
-            eprintln!("count={:?} prev_count={:?}", count, prev_count);
+            let count = count_directory_entries(temp.path()).unwrap();
             assert!(count < prev_count);
             prev_count = count;
         }
-        // this might change if the spine implementation changes:
-        assert_eq!(prev_count, 9, "9 files left");
+        assert_eq!(prev_count, 9, "9 entries left");
     }
 
     /// Checks that we can restore the state of a circuit to a previous
@@ -1143,6 +1225,7 @@ mod tests {
         ];
         const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
         let mut committed = vec![];
+        let mut checkpoints = vec![];
 
         // We create a circuit and push data into it, we also take a checkpoint at very
         // step
@@ -1150,7 +1233,7 @@ mod tests {
             let cconf = CircuitConfig {
                 layout: Layout::new_solo(1),
                 storage: Some(temp.path().to_str().unwrap().to_string()),
-                init_checkpoint: 0,
+                init_checkpoint: Uuid::nil(),
             };
             let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
 
@@ -1160,7 +1243,8 @@ mod tests {
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
                 input_handle.append(&mut batches_to_insert[i]);
                 dbsp.step().unwrap();
-                let _cid = dbsp.commit().expect("commit failed");
+                let cpm = dbsp.commit().expect("commit failed");
+                checkpoints.push(cpm);
                 let res = output_handle.take_from_all();
 
                 let mut keys = vec![];
@@ -1179,11 +1263,11 @@ mod tests {
 
         // Next, we instantiate every checkpoint and make sure the circuit state is
         // what we would expect it to be at the given point we restored it to
-        for i in 1..batches.len() {
+        for (i, cpm) in checkpoints.iter().enumerate() {
             let cconf = CircuitConfig {
                 layout: Layout::new_solo(1),
                 storage: Some(temp.path().to_str().unwrap().to_string()),
-                init_checkpoint: i as u64,
+                init_checkpoint: cpm.uuid,
             };
 
             let (mut dbsp, (_input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
@@ -1191,7 +1275,7 @@ mod tests {
             dbsp.step().unwrap();
 
             let res = output_handle.take_from_all();
-            let expected_zset = committed[i - 1].clone();
+            let expected_zset = committed[i].clone();
             assert_eq!(expected_zset, res[0]);
         }
     }

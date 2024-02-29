@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Note: If you add a feature, adjust the ALMOST_ALL_FEATURES environment variable in
 # main.yml and coverage.yml:
 default = ["with-serde"]
-persistence = ["rocksdb", "uuid"]
+persistence = ["rocksdb"]
 with-serde = ["serde"]
 with-csv = ["csv"]
 persistence2 = []
@@ -46,14 +46,14 @@ crossbeam = "0.8.2"
 rocksdb = { version = "0.21", default-features = false, features = [
     "multi-threaded-cf",
 ], optional = true }
-uuid = { version = "1.1.2", features = ["v4"], optional = true }
+uuid = { version = "1.7.0", features = ["v4", "v7"] }
 arc-swap = "1.5.1"
 mimalloc-rust-sys = "1.7.2"
 rand = "0.8.5"
 # Revert after https://github.com/paupino/rust-decimal/pull/637 is merged:
 rust_decimal = { git = "https://github.com/gz/rust-decimal.git", rev = "ea85fdf" }
 # Go back to rkyv repo once https://github.com/rkyv/rkyv/pull/462 is merged:
-rkyv = { git = "https://github.com/gz/rkyv.git", rev = "3d3fd86", default-features = false, features = ["std", "size_64", "extra_traits"] }
+rkyv = { git = "https://github.com/gz/rkyv.git", rev = "3d3fd86", default-features = false, features = ["std", "size_64", "uuid", "extra_traits"] }
 # Once chrono is released with `849932` chrono version needs to be updated in size-of crate:
 size-of = { git = "https://github.com/gz/size-of.git", rev = "3ec40db", features = ["hashbrown", "time-std", "xxhash-xxh3", "arcstr", "chrono", "ordered-float"] }
 tarpc = { version = "0.33.0", features = ["full"] }

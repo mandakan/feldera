@@ -5,6 +5,7 @@
 
 use futures::{task::noop_waker, Future};
 use metrics::counter;
+use std::io::{Error, ErrorKind};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -12,7 +13,6 @@ use std::{
     sync::{Arc, RwLock},
     task::Context,
 };
-use std::io::{Error, ErrorKind};
 
 use crate::{backend::NEXT_FILE_HANDLE, buffer_cache::FBuf};
 
@@ -104,13 +104,16 @@ impl StorageControl for MemoryBackend {
         Ok(ImmutableFileHandle(file_id))
     }
 
-
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
     }
 
     async fn delete_mut(&self, fd: FileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
+    }
+
+    async fn base(&self) -> &Path {
+        todo!()
     }
 }
 
@@ -183,8 +186,8 @@ impl StorageRead for MemoryBackend {
 
 impl StorageExecutor for MemoryBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-        where
-            F: Future,
+    where
+        F: Future,
     {
         // Extracts the result from `future` assuming that it's already ready.
         let waker = noop_waker();

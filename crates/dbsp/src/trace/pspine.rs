@@ -110,6 +110,7 @@ use std::{
     mem::replace,
 };
 use textwrap::indent;
+use uuid::Uuid;
 
 use super::Filter;
 
@@ -466,21 +467,27 @@ where
     /// Return the absolute path of the file for this Spine checkpoint.
     ///
     /// # Arguments
-    /// - `sid`: The step id of the checkpoint.
-    fn checkpoint_path<P: AsRef<str>>(persistent_id: P, sid: u64) -> PathBuf {
+    /// - `cid`: The checkpoint id.
+    /// - `persistent_id`: The persistent id that identifies the spine within
+    ///   the circuit for a given checkpoint.
+    fn checkpoint_path<P: AsRef<str>>(cid: Uuid, persistent_id: P) -> PathBuf {
         let rt = Runtime::runtime().unwrap();
-        let path = PathBuf::from(rt.storage_path());
-        path.join(format!("pspine-{}-{}.dat", sid, persistent_id.as_ref()))
+        let mut path = PathBuf::from(rt.storage_path());
+        path.push(cid.to_string());
+        path.push(format!("pspine-{}.dat", persistent_id.as_ref()));
+        path
     }
 
     /// Return the absolute path of the file for this Spine's batchlist.
     ///
     /// # Arguments
     /// - `sid`: The step id of the checkpoint.
-    fn batchlist_path(&self, sid: u64) -> PathBuf {
+    fn batchlist_path(&self, cid: Uuid) -> PathBuf {
         let rt = Runtime::runtime().unwrap();
-        let path = PathBuf::from(rt.storage_path());
-        path.join(format!("pspine-batches-{}-{}.dat", sid, self.persistent_id))
+        let mut path = PathBuf::from(rt.storage_path());
+        path.push(cid.to_string());
+        path.push(format!("pspine-batches-{}.dat", self.persistent_id));
+        path
     }
 }
 
@@ -700,19 +707,19 @@ where
     type Batch = B;
 
     fn new<S: AsRef<str>>(activator: Option<Activator>, persistent_id: S) -> Self {
-        Self::with_effort(1, activator, String::from(persistent_id.as_ref()), 0)
+        Self::with_effort(1, activator, String::from(persistent_id.as_ref()))
     }
 
-    fn from_step_id<S: AsRef<str>>(
+    fn from_commit_id<S: AsRef<str>>(
         activator: Option<Activator>,
+        cid: Uuid,
         persistent_id: S,
-        sid: u64,
     ) -> Self {
-        eprintln!("calling from_step_id {sid}");
-        let mut spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()), sid);
+        eprintln!("calling from_step_id {cid}");
+        let mut spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()));
 
-        if sid > 0 {
-            let pspine_path = Self::checkpoint_path(persistent_id, sid);
+        if cid != Uuid::nil() {
+            let pspine_path = Self::checkpoint_path(cid, persistent_id);
             let content = fs::read(pspine_path).expect("Checkpoint file should exists.");
             let archived = unsafe { rkyv::archived_root::<CommittedSpine<B>>(&content) };
             let committed: CommittedSpine<B> = archived.deserialize(&mut rkyv::Infallible).unwrap();
@@ -723,10 +730,13 @@ where
             spine.lower_key_bound = committed.lower_key_bound;
             spine.key_filter = None; //committed.key_filter;
             spine.value_filter = None; //committed.value_filter;
-            eprintln!("Loaded spine from step {sid}");
+            eprintln!("Loaded spine from step {cid}");
             for batch in committed.batches {
                 eprintln!("reinsert batch {batch} from step");
-                let batch = B::from_path(&batch).unwrap();
+                let mut batch = B::from_path(&batch).unwrap();
+                if let Some(bound) = &spine.lower_key_bound {
+                    batch.truncate_keys_below(bound);
+                }
                 spine.insert(batch);
             }
         }
@@ -852,8 +862,8 @@ where
         &self.value_filter
     }
 
-    fn commit(&self, cid: u64) -> Result<(), Error> {
-        let cspine_path = Self::checkpoint_path(&self.persistent_id, cid);
+    fn commit(&self, cid: Uuid) -> Result<(), Error> {
+        let cspine_path = Self::checkpoint_path(cid, &self.persistent_id);
         let committed: CommittedSpine<B> = self.into();
         let as_bytes =
             feldera_storage::file::to_bytes(&committed).expect("failed to serialize spine data");
@@ -952,7 +962,6 @@ where
         mut effort: usize,
         activator: Option<Activator>,
         persistent_id: String,
-        _sid: u64,
     ) -> Self {
         // Zero effort is .. not smart.
         if effort == 0 {

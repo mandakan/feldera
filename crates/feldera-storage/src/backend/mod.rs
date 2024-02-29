@@ -14,11 +14,12 @@
 #![allow(async_fn_in_trait)]
 #![warn(missing_docs)]
 
+use std::fs::create_dir_all;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use thiserror::Error;
@@ -106,8 +107,8 @@ pub enum StorageError {
 
 impl Serialize for StorageError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         match self {
             Self::StdIo(error) => {
@@ -152,15 +153,24 @@ pub trait StorageControl {
     /// Extensions for files that are created anonymously.
     const CREATE_FILE_EXTENSION: &'static str = ".feldera";
 
+    /// Creates a new directory.
+    ///
+    /// # Arguments
+    /// - path: of the directory to create, relative to the base of the storage.
+    async fn mkdir<P: AsRef<Path>>(&self, path: P) -> Result<(), StorageError> {
+        let path = self.base().await.join(path);
+        create_dir_all(path).map_err(StorageError::StdIo)
+    }
+
     /// Create a new file. See also [`create`](Self::create).
     ///
     /// # Arguments
     /// - name: of the file to create, relative to the base of the storage.
     ///
     /// # Notes for implementors
-    /// The implementation of [`create_named`] should ensure that (persistent) files
-    /// have the [`Self::MUTABLE_EXTENSION`] extension added to the name
-    /// until they are completed.
+    /// The implementation of [`create_named`] should ensure that (persistent)
+    /// files have the [`Self::MUTABLE_EXTENSION`] extension added to the
+    /// name until they are completed.
     /// This makes it easier to detect files that were not completed properly
     /// in case of aborts/crashes.
     async fn create_named<P: AsRef<Path>>(&self, name: P) -> Result<FileHandle, StorageError>;
@@ -198,6 +208,9 @@ pub trait StorageControl {
     /// Use [`delete`](Self::delete) for deleting a file that has been
     /// completed.
     async fn delete_mut(&self, fd: FileHandle) -> Result<(), StorageError>;
+
+    /// Returns the base of the storage backend.
+    async fn base(&self) -> &Path;
 }
 
 /// A trait for a storage backend to implement so clients can write to files.
@@ -304,8 +317,8 @@ pub trait StorageRead {
 pub trait StorageExecutor {
     /// Runs `future` to completion in the storage backend's executor.
     fn block_on<F>(&self, future: F) -> F::Output
-        where
-            F: Future;
+    where
+        F: Future;
 }
 
 //pub use memory_impl::MemoryBackend as DefaultBackend;

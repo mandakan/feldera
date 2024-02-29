@@ -125,6 +125,10 @@ impl<const ALLOW_OVERWRITE: bool> StorageControl for InMemoryBackend<ALLOW_OVERW
         self.files.borrow_mut().remove(&fd.0);
         Ok(())
     }
+
+    async fn base(&self) -> &Path {
+        Path::new("")
+    }
 }
 
 fn insert_slice_at_offset(

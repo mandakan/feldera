@@ -1,19 +1,35 @@
 //! Implementation of the storage backend APIs ([`StorageControl`],
 //! [`StorageRead`], and [`StorageWrite`]) using POSIX I/O.
 
-use std::{collections::HashMap, fs::{File, OpenOptions}, fs, io::{Error as IoError, Seek}, os::unix::prelude::FileExt, path::{Path, PathBuf}, rc::Rc, sync::{Arc, RwLock}, task::Context, time::Instant};
 use std::os::unix::fs::MetadataExt;
+use std::{
+    collections::HashMap,
+    fs,
+    fs::{File, OpenOptions},
+    io::{Error as IoError, Seek},
+    os::unix::prelude::FileExt,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{Arc, RwLock},
+    task::Context,
+    time::Instant,
+};
 
-use futures::{Future, task::noop_waker};
+use futures::{task::noop_waker, Future};
 use metrics::{counter, histogram};
 use tempfile::TempDir;
 
 use crate::{backend::NEXT_FILE_HANDLE, buffer_cache::FBuf, init};
 
-use super::{append_to_path, AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, metrics::{
-    describe_disk_metrics, FILES_CREATED, FILES_DELETED, READ_LATENCY, READS_FAILED,
-    READS_SUCCESS, TOTAL_BYTES_READ, TOTAL_BYTES_WRITTEN, WRITE_LATENCY, WRITES_SUCCESS,
-}, StorageControl, StorageError, StorageExecutor, StorageRead, StorageWrite};
+use super::{
+    append_to_path,
+    metrics::{
+        describe_disk_metrics, FILES_CREATED, FILES_DELETED, READS_FAILED, READS_SUCCESS,
+        READ_LATENCY, TOTAL_BYTES_READ, TOTAL_BYTES_WRITTEN, WRITES_SUCCESS, WRITE_LATENCY,
+    },
+    AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, StorageControl, StorageError,
+    StorageExecutor, StorageRead, StorageWrite,
+};
 
 /// Helper function that opens files as direct IO files on linux.
 fn open_as_direct<P: AsRef<Path>>(p: P, options: &mut OpenOptions) -> Result<File, IoError> {
@@ -191,7 +207,6 @@ impl StorageControl for PosixBackend {
         Ok(ImmutableFileHandle(file_counter))
     }
 
-
     async fn delete(&self, fd: ImmutableFileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
             .map(|_| counter!(FILES_DELETED).increment(1))
@@ -200,6 +215,10 @@ impl StorageControl for PosixBackend {
     async fn delete_mut(&self, fd: FileHandle) -> Result<(), StorageError> {
         self.delete_inner(fd.0)
             .map(|_| counter!(FILES_DELETED).increment(1))
+    }
+
+    async fn base(&self) -> &Path {
+        &self.base
     }
 }
 
@@ -290,8 +309,8 @@ impl StorageRead for PosixBackend {
 
 impl StorageExecutor for PosixBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-        where
-            F: Future,
+    where
+        F: Future,
     {
         // Extracts the result from `future` assuming that it's already ready.
         let waker = noop_waker();

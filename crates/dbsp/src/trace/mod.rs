@@ -66,6 +66,7 @@ use rkyv::{archived_root, Archive, Archived, Deserialize, Infallible, Serialize}
 use size_of::SizeOf;
 use std::path::{Path, PathBuf};
 use std::{fmt::Debug, hash::Hash};
+use uuid::Uuid;
 
 /// Trait for data stored in batches.
 ///
@@ -199,11 +200,16 @@ pub trait Trace: BatchReader {
     fn new<S: AsRef<str>>(activator: Option<Activator>, persistent_id: S) -> Self;
 
     /// Allocates a new trace and initialize it with batches found for the given
-    /// step-id.
-    fn from_step_id<S: AsRef<str>>(
+    /// checkpoint.
+    ///
+    /// # Arguments
+    /// - `activator` - an activator to be used to wake up the trace.
+    /// - `cid` - the commit id of the checkpoint to be loaded.
+    /// - `persistent_id` - the persistent id of the trace.
+    fn from_commit_id<S: AsRef<str>>(
         activator: Option<Activator>,
+        cid: Uuid,
         persistent_id: S,
-        sid: u64,
     ) -> Self;
 
     /// Pushes all timestamps in the trace back to `frontier` or less, by
@@ -275,7 +281,7 @@ pub trait Trace: BatchReader {
 
     fn key_filter(&self) -> &Option<Filter<Self::Key>>;
     fn value_filter(&self) -> &Option<Filter<Self::Val>>;
-    fn commit(&self, _cid: u64) -> Result<(), Error> {
+    fn commit(&self, _cid: Uuid) -> Result<(), Error> {
         Ok(())
     }
 }

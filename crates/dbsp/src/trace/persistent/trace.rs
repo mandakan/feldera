@@ -512,7 +512,11 @@ where
         }
     }
 
-    fn from_step_id<S: AsRef<str>>(_activator: Option<Activator>, _persistent_id: S, _sid: u64) -> Self {
+    fn from_commit_id<S: AsRef<str>>(
+        _activator: Option<Activator>,
+        _cid: Uuid,
+        _persistent_id: S,
+    ) -> Self {
         unimplemented!()
     }
 

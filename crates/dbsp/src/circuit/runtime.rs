@@ -28,6 +28,7 @@ use std::{
     thread::{Builder, JoinHandle, LocalKey, Result as ThreadResult},
 };
 use typedmap::{TypedDashMap, TypedMapKey};
+use uuid::Uuid;
 
 use super::dbsp_handle::{IntoCircuitConfig, Layout};
 
@@ -177,7 +178,7 @@ impl WorkerPanicInfo {
 struct RuntimeInner {
     layout: Layout,
     storage: StorageLocation,
-    start_checkpoint: u64,
+    start_checkpoint: Uuid,
     store: LocalStore,
     // Panic info collected from failed worker threads.
     panic_info: Vec<RwLock<Option<WorkerPanicInfo>>>,
@@ -237,7 +238,7 @@ impl Debug for RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(layout: Layout, storage: Option<String>, start_checkpoint: u64) -> Self {
+    fn new(layout: Layout, storage: Option<String>, start_checkpoint: Uuid) -> Self {
         let local_workers = layout.local_workers().len();
         let mut panic_info = Vec::with_capacity(local_workers);
         for _ in 0..local_workers {
@@ -247,7 +248,7 @@ impl RuntimeInner {
             // Note that we use into_path() here which avoids deleting the temporary directory
             // we still clean it up when the runtime is dropped -- but keep it around on panic.
             || {
-                if start_checkpoint > 0 {
+                if start_checkpoint != Uuid::nil() {
                     panic!("Cannot specify a checkpoint without a storage location");
                 }
                 StorageLocation::Temporary(tempfile::tempdir().unwrap().into_path())
@@ -454,7 +455,7 @@ impl Runtime {
         CACHE.with(|rc| rc.clone())
     }
 
-    pub(crate) fn start_checkpoint(&self) -> u64 {
+    pub(crate) fn start_checkpoint(&self) -> Uuid {
         self.inner().start_checkpoint
     }
 
@@ -671,6 +672,7 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
     use std::{cell::RefCell, rc::Rc, thread::sleep, time::Duration};
+    use uuid::Uuid;
 
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -693,7 +695,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: Some(path.to_str().unwrap().to_string()),
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
 
         let hruntime = Runtime::run(cconf, move || {
@@ -713,7 +715,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: None,
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
         let storage_path_clone = storage_path.clone();
         let hruntime = Runtime::run(cconf, move || {
@@ -734,7 +736,7 @@ mod tests {
         let cconf = CircuitConfig {
             layout: Layout::new_solo(4),
             storage: None,
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
         let storage_path_clone = storage_path.clone();
         let hruntime = Runtime::run(cconf, move || {

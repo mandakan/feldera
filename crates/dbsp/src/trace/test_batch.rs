@@ -21,13 +21,14 @@ use rkyv::Deserialize;
 use rkyv::Fallible;
 use rkyv::Serialize;
 use size_of::SizeOf;
+use std::path::PathBuf;
 use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Debug},
     marker::PhantomData,
 };
-use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Convert any batch into a vector of tuples.
 pub fn batch_to_tuples<B>(batch: &B) -> Vec<((B::Key, B::Val, B::Time), B::R)>
@@ -939,7 +940,11 @@ where
         }
     }
 
-    fn from_step_id<S: AsRef<str>>(_activator: Option<Activator>, _persistent_id: S, _sid: u64) -> Self {
+    fn from_commit_id<S: AsRef<str>>(
+        _activator: Option<Activator>,
+        _cid: Uuid,
+        _persistent_id: S,
+    ) -> Self {
         unimplemented!()
     }
 

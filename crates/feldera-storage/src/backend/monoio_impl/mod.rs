@@ -1,7 +1,6 @@
 //! Implementation of the storage backend APIs ([`StorageControl`],
 //! [`StorageRead`], and [`StorageWrite`]) using the Monoio library.
 
-use std::{fs, io};
 use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::HashMap;
@@ -11,19 +10,25 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{fs, io};
 
 use async_lock::RwLock;
 use metrics::{counter, histogram};
-use monoio::{FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder};
 use monoio::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
 use monoio::IoUringDriver;
+use monoio::{FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder};
 use tempfile::TempDir;
 
-use crate::backend::{append_to_path, AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, metrics::{
-    FILES_CREATED, FILES_DELETED, READ_LATENCY, READS_FAILED, READS_SUCCESS, TOTAL_BYTES_READ,
-    TOTAL_BYTES_WRITTEN, WRITE_LATENCY, WRITES_SUCCESS,
-}, NEXT_FILE_HANDLE, StorageControl, StorageError, StorageRead, StorageWrite};
+use crate::backend::{
+    append_to_path,
+    metrics::{
+        FILES_CREATED, FILES_DELETED, READS_FAILED, READS_SUCCESS, READ_LATENCY, TOTAL_BYTES_READ,
+        TOTAL_BYTES_WRITTEN, WRITES_SUCCESS, WRITE_LATENCY,
+    },
+    AtomicIncrementOnlyI64, FileHandle, ImmutableFileHandle, StorageControl, StorageError,
+    StorageRead, StorageWrite, NEXT_FILE_HANDLE,
+};
 use crate::buffer_cache::FBuf;
 use crate::init;
 
@@ -130,7 +135,7 @@ impl StorageControl for MonoioBackend {
             &path,
             OpenOptions::new().create_new(true).write(true).read(true),
         )
-            .await?;
+        .await?;
         let mut files = self.files.write().await;
 
         let file_counter = self.next_file_id.increment();
@@ -179,6 +184,10 @@ impl StorageControl for MonoioBackend {
             .await
             .map(|_| counter!(FILES_DELETED).increment(1))
     }
+
+    async fn base(&self) -> &Path {
+        self.base.as_path()
+    }
 }
 
 impl StorageWrite for MonoioBackend {
@@ -210,7 +219,11 @@ impl StorageWrite for MonoioBackend {
         let mut files = self.files.write().await;
 
         let mut fm = files.remove(&fd.0).unwrap();
-        assert_eq!(fm.path.extension().and_then(|s| s.to_str()), Some(&Self::MUTABLE_EXTENSION[1..]), "Mutable file does not have the right extension");
+        assert_eq!(
+            fm.path.extension().and_then(|s| s.to_str()),
+            Some(&Self::MUTABLE_EXTENSION[1..]),
+            "Mutable file does not have the right extension"
+        );
         fm.file.sync_all().await?;
 
         // Remove the MUTABLE_EXTENSION from the file name.
@@ -274,8 +287,8 @@ impl StorageRead for MonoioBackend {
 
 impl StorageExecutor for MonoioBackend {
     fn block_on<F>(&self, future: F) -> F::Output
-        where
-            F: Future,
+    where
+        F: Future,
     {
         #[cfg(target_os = "linux")]
         thread_local! {
@@ -285,8 +298,7 @@ impl StorageExecutor for MonoioBackend {
                              .build()
                              .unwrap())
             }
-        }
-        ;
+        };
         #[cfg(not(target_os = "linux"))]
         thread_local! {
             pub static RUNTIME: RefCell<FusionRuntime<LegacyDriver>> = {
