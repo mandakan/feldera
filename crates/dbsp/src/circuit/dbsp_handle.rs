@@ -875,12 +875,15 @@ impl Drop for DBSPHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
     use std::time::Duration;
 
     use crate::circuit::{CircuitConfig, Layout};
     use crate::operator::trace::TraceBound;
     use crate::operator::Generator;
-    use crate::trace::ord::{FileIndexedZSet, VecZSet};
+    use crate::trace::ord::VecZSet;
     use crate::utils::Tup2;
     use crate::{
         Circuit, CollectionHandle, DBSPHandle, Error as DBSPError, InputHandle, OutputHandle,
@@ -1067,14 +1070,28 @@ mod tests {
             sample_size_handle.set_for_all(2);
             dbsp.step().unwrap();
             dbsp.commit_named("test-commit").expect("commit failed");
+            dbsp.step().unwrap();
+            dbsp.commit().expect("commit failed");
         }
 
         {
-            let (dbsp, _) = mkcircuit(&cconf);
-            let cpm = dbsp.checkpoint_list.front().unwrap();
+            let (mut dbsp, _) = mkcircuit(&cconf);
+            let cpm = dbsp
+                .checkpoint_list
+                .pop_front()
+                .expect("checkpoint list should not be empty");
             assert_eq!(cpm.step_id, 1);
             assert_ne!(cpm.uuid, Uuid::nil());
             assert_eq!(cpm.identifier, Some(String::from("test-commit")));
+
+            let cpm2 = dbsp
+                .checkpoint_list
+                .pop_front()
+                .expect("checkpoint list should not be empty");
+            assert_eq!(cpm2.step_id, 2);
+            assert_ne!(cpm2.uuid, Uuid::nil());
+            assert_ne!(cpm2.uuid, cpm.uuid);
+            assert_eq!(cpm2.identifier, None);
         }
     }
 
@@ -1082,11 +1099,8 @@ mod tests {
     /// `gc_checkpoint`.
     #[test]
     fn gc_commits() {
-        use crate::{utils::Tup2, Runtime, Stream};
-        use std::cmp::max;
-        use std::fs;
-        use std::io;
-        use std::path::Path;
+        let _r = env_logger::try_init();
+
         let temp = tempdir().expect("Can't create temp dir for storage");
         let cconf = CircuitConfig {
             layout: Layout::new_solo(1),
@@ -1104,50 +1118,24 @@ mod tests {
             Ok(file_count)
         }
 
-        let _r = env_logger::try_init();
+        let (mut dbsp, (input_handle, _, _)) = mkcircuit(&cconf);
 
-        let (mut dbsp, input_handle) = Runtime::init_circuit(cconf, move |circuit| {
-            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-            let stream = stream.shard();
-            let watermark: Stream<_, (i32, i32)> = stream.waterline(
-                || (i32::MIN, i32::MIN),
-                |k, v| (*k, *v),
-                |(ts1_left, ts2_left), (ts1_right, ts2_right)| {
-                    (max(*ts1_left, *ts1_right), max(*ts2_left, *ts2_right))
-                },
-            );
-
-            let _trace = stream.integrate_trace();
-            stream.integrate_trace_retain_keys(&watermark, |key, ts| *key >= ts.0 - 100);
-            Ok(handle)
-        })
-        .unwrap();
-
-        let cid = dbsp.commit().expect("commit failed");
-        let batches: Vec<Vec<((i32, i32), i32)>> = vec![
-            vec![((1, 2), 1)],
-            vec![((2, 3), 1)],
-            vec![((3, 4), 1)],
-            vec![((3, 4), 1)],
-            vec![((1, 2), 1)],
-            vec![((2, 3), 1)],
-            vec![((3, 4), 1)],
-            vec![((3, 4), 1)],
+        let _cpm = dbsp.commit().expect("commit failed");
+        let mut batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
+            vec![(1, Tup2(2, 1))],
+            vec![(2, Tup2(3, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(1, Tup2(2, 1))],
+            vec![(2, Tup2(3, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(3, Tup2(4, 1))],
         ];
-        for batches in batches.chunks(2) {
-            let mut tuples = batches
-                .iter()
-                .map(|batch| {
-                    batch
-                        .iter()
-                        .map(|((k, v), r)| (*k, Tup2(*v, *r)))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            input_handle.append(&mut tuples[0]);
-            input_handle.append(&mut tuples[1]);
+        for chunk in batches.chunks_mut(2) {
+            input_handle.append(&mut chunk[0]);
+            input_handle.append(&mut chunk[1]);
             dbsp.step().unwrap();
-            let cpm = dbsp.commit().expect("commit failed");
+            let _cpm = dbsp.commit().expect("commit failed");
         }
 
         let mut prev_count = count_directory_entries(temp.path()).unwrap();
@@ -1185,8 +1173,6 @@ mod tests {
         // step
         {
             let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
-            let mut batches_to_insert = input.clone();
-
             for mut batch in input.clone() {
                 let cpm = dbsp.commit().expect("commit failed");
                 checkpoints.push(cpm);
@@ -1238,8 +1224,6 @@ mod tests {
         let _r = env_logger::try_init();
         let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
             vec![(1, Tup2(2, 1))],
-            vec![(3, Tup2(4, 1))],
-            vec![(5, Tup2(6, 1))],
             vec![(7, Tup2(8, 1))],
             vec![(9, Tup2(10, 1))],
             vec![(12, Tup2(12, 1))],
