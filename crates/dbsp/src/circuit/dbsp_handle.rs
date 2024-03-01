@@ -1186,19 +1186,20 @@ mod tests {
         {
             let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
 
-            for i in 0..input.len() {
-                let mut batches_to_insert = input.clone();
-
+            for mut batch in input.clone() {
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
-                input_handle.append(&mut batches_to_insert[i]);
+                input_handle.append(&mut batch);
                 dbsp.step().unwrap();
+
                 let cpm = dbsp.commit().expect("commit failed");
                 checkpoints.push(cpm);
+
                 let res = output_handle.take_from_all();
                 committed.push(res[0].clone());
             }
         }
 
+        assert_eq!(committed.len(), input.len());
         eprintln!("committed: {:?}", committed);
 
         // Next, we instantiate every checkpoint and make sure the circuit state is
@@ -1225,18 +1226,6 @@ mod tests {
             vec![(7, Tup2(8, 1))],
             vec![(9, Tup2(10, 1))],
         ];
-        fn mkcircuit(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
-            Runtime::init_circuit(cconf, move |circuit| {
-                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-                let sample_handle = stream
-                    .integrate_trace()
-                    .stream_sample_unique_key_vals(&sample_size_stream)
-                    .output();
-                Ok((handle, sample_handle, sample_size_handle))
-            })
-            .unwrap()
-        }
 
         generic_checkpoint_restore(batches, mkcircuit);
     }

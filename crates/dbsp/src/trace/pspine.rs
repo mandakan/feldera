@@ -728,15 +728,16 @@ where
             spine.effort = committed.effort as usize;
             spine.dirty = committed.dirty;
             spine.lower_key_bound = committed.lower_key_bound;
+            eprintln!(
+                "Loaded spine from step {cid} with lower_key_bound={:?}",
+                &spine.lower_key_bound
+            );
             spine.key_filter = None; //committed.key_filter;
             spine.value_filter = None; //committed.value_filter;
             eprintln!("Loaded spine from step {cid}");
             for batch in committed.batches {
                 eprintln!("reinsert batch {batch} from step");
-                let mut batch = B::from_path(&batch).unwrap();
-                if let Some(bound) = &spine.lower_key_bound {
-                    batch.truncate_keys_below(bound);
-                }
+                let batch = B::from_path(&batch).unwrap();
                 spine.insert(batch);
             }
         }
