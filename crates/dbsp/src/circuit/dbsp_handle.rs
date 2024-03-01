@@ -880,7 +880,7 @@ mod tests {
     use crate::circuit::{CircuitConfig, Layout};
     use crate::operator::trace::TraceBound;
     use crate::operator::Generator;
-    use crate::trace::ord::VecZSet;
+    use crate::trace::ord::{FileIndexedZSet, VecZSet};
     use crate::utils::Tup2;
     use crate::{
         Circuit, CollectionHandle, DBSPHandle, Error as DBSPError, InputHandle, OutputHandle,
@@ -1185,14 +1185,15 @@ mod tests {
         // step
         {
             let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
+            let mut batches_to_insert = input.clone();
 
             for mut batch in input.clone() {
+                let cpm = dbsp.commit().expect("commit failed");
+                checkpoints.push(cpm);
+
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
                 input_handle.append(&mut batch);
                 dbsp.step().unwrap();
-
-                let cpm = dbsp.commit().expect("commit failed");
-                checkpoints.push(cpm);
 
                 let res = output_handle.take_from_all();
                 committed.push(res[0].clone());
@@ -1204,10 +1205,12 @@ mod tests {
 
         // Next, we instantiate every checkpoint and make sure the circuit state is
         // what we would expect it to be at the given point we restored it to
+        let mut batches_to_insert = input.clone();
         for (i, cpm) in checkpoints.iter().enumerate() {
             cconf.init_checkpoint = cpm.uuid;
-            let (mut dbsp, (_input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
             sample_size_handle.set_for_all(SAMPLE_SIZE);
+            input_handle.append(&mut batches_to_insert[i]);
             dbsp.step().unwrap();
 
             let res = output_handle.take_from_all();
@@ -1239,6 +1242,8 @@ mod tests {
             vec![(5, Tup2(6, 1))],
             vec![(7, Tup2(8, 1))],
             vec![(9, Tup2(10, 1))],
+            vec![(12, Tup2(12, 1))],
+            vec![(13, Tup2(13, 1))],
         ];
         #[allow(clippy::type_complexity)]
         fn mkcircuit_with_bounds(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
