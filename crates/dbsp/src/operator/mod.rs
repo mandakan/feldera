@@ -8,6 +8,7 @@ pub mod recursive;
 pub(crate) mod apply;
 pub(crate) mod input_upsert;
 pub(crate) mod inspect;
+pub(crate) mod trace;
 pub(crate) mod upsert;
 
 mod aggregate;
@@ -36,7 +37,6 @@ mod semijoin;
 mod stream_fold;
 mod sum;
 pub mod time_series;
-mod trace;
 mod z1;
 
 #[cfg(feature = "with-csv")]

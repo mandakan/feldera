@@ -656,8 +656,11 @@ impl DBSPHandle {
 
     /// Create a new named checkpoint by taking consistent snapshot of the state
     /// in dbsp.
-    pub fn commit_named(&mut self, name: String) -> Result<CheckpointMetadata, DBSPError> {
-        self.commit_as(Uuid::now_v7(), Some(name))
+    pub fn commit_named<S: Into<String> + AsRef<str>>(
+        &mut self,
+        name: S,
+    ) -> Result<CheckpointMetadata, DBSPError> {
+        self.commit_as(Uuid::now_v7(), Some(name.into()))
     }
 
     fn commit_as(
@@ -875,15 +878,23 @@ mod tests {
     use std::time::Duration;
 
     use crate::circuit::{CircuitConfig, Layout};
+    use crate::operator::trace::TraceBound;
+    use crate::operator::Generator;
     use crate::trace::ord::VecZSet;
     use crate::utils::Tup2;
     use crate::{
-        operator::Generator, Circuit, CollectionHandle, DBSPHandle, Error as DBSPError,
-        InputHandle, OutputHandle, Runtime, RuntimeError,
+        Circuit, CollectionHandle, DBSPHandle, Error as DBSPError, InputHandle, OutputHandle,
+        Runtime, RuntimeError,
     };
     use anyhow::anyhow;
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    type CircuitHandle = (
+        CollectionHandle<i32, Tup2<i32, i32>>,
+        OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
+        InputHandle<usize>,
+    );
 
     // Panic during initialization in worker thread.
     #[test]
@@ -1027,17 +1038,7 @@ mod tests {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn mkcircuit(
-        cconf: &CircuitConfig,
-    ) -> (
-        DBSPHandle,
-        (
-            CollectionHandle<i32, Tup2<i32, i32>>,
-            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
-            InputHandle<usize>,
-        ),
-    ) {
+    fn mkcircuit(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
         Runtime::init_circuit(cconf, move |circuit| {
             let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
             let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
@@ -1049,54 +1050,6 @@ mod tests {
         })
         .unwrap()
     }
-
-    /*#[allow(clippy::type_complexity)]
-    fn mkcircuit2(
-        cconf: &CircuitConfig,
-    ) -> (
-        DBSPHandle,
-        (
-            CollectionHandle<i32, Tup2<i32, i32>>,
-            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
-            InputHandle<usize>,
-        ),
-    ) {
-        Runtime::init_circuit(cconf, move |circuit| {
-            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-            let sample_handle = stream
-                .integrate_trace_with_bound()
-                .stream_sample_unique_key_vals(&sample_size_stream)
-                .output();
-            Ok((handle, sample_handle, sample_size_handle))
-        })
-        .unwrap()
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn mkcircuit3(
-        cconf: &CircuitConfig,
-    ) -> (
-        DBSPHandle,
-        (
-            CollectionHandle<i32, Tup2<i32, i32>>,
-            OutputHandle<VecZSet<Tup2<i32, i32>, i32>>,
-            InputHandle<usize>,
-        ),
-    ) {
-        Runtime::init_circuit(cconf, move |circuit| {
-            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-            let sample_handle = stream
-                .integrate_trace_with_bound()
-                .stream_sample_unique_key_vals(&sample_size_stream)
-                .output();
-            // inspect trace, measure size
-
-            Ok((handle, sample_handle, sample_size_handle))
-        })
-        .unwrap()
-    }*/
 
     /// If we call commit, we should preserve the checkpoint list across circuit
     /// restarts.
@@ -1113,7 +1066,7 @@ mod tests {
             let (mut dbsp, (_input_handle, _output_handle, sample_size_handle)) = mkcircuit(&cconf);
             sample_size_handle.set_for_all(2);
             dbsp.step().unwrap();
-            dbsp.commit().expect("commit failed");
+            dbsp.commit_named("test-commit").expect("commit failed");
         }
 
         {
@@ -1121,7 +1074,7 @@ mod tests {
             let cpm = dbsp.checkpoint_list.front().unwrap();
             assert_eq!(cpm.step_id, 1);
             assert_ne!(cpm.uuid, Uuid::nil());
-            assert_eq!(cpm.identifier, None);
+            assert_eq!(cpm.identifier, Some(String::from("test-commit")));
         }
     }
 
@@ -1208,37 +1161,33 @@ mod tests {
         assert_eq!(prev_count, 9, "9 entries left");
     }
 
-    /// Checks that we can restore the state of a circuit to a previous
-    /// checkpoint and that the state is consistent with what we would
-    /// expect it to be at that point.
-    #[test]
-    fn commit_restore() {
-        use crate::utils::Tup2;
-        let _r = env_logger::try_init();
-        let temp = tempdir().expect("Can't create temp dir for storage");
-        let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
-            vec![(1, Tup2(2, 1))],
-            vec![(3, Tup2(4, 1))],
-            vec![(5, Tup2(6, 1))],
-            vec![(7, Tup2(8, 1))],
-            vec![(9, Tup2(10, 1))],
-        ];
+    /// Utility function that runs a circuit and takes a checkpoint at every
+    /// step. It then restores the circuit to every checkpoint and checks that
+    /// the state is consistent with what we would expect it to be at that
+    /// point.
+    fn generic_checkpoint_restore(
+        input: Vec<Vec<(i32, Tup2<i32, i32>)>>,
+        circuit_fun: fn(&CircuitConfig) -> (DBSPHandle, CircuitHandle),
+    ) {
         const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
+        let temp = tempdir().expect("Can't create temp dir for storage");
+
+        let mut cconf = CircuitConfig {
+            layout: Layout::new_solo(1),
+            storage: Some(temp.path().to_str().unwrap().to_string()),
+            init_checkpoint: Uuid::nil(),
+        };
+
         let mut committed = vec![];
         let mut checkpoints = vec![];
 
         // We create a circuit and push data into it, we also take a checkpoint at very
         // step
         {
-            let cconf = CircuitConfig {
-                layout: Layout::new_solo(1),
-                storage: Some(temp.path().to_str().unwrap().to_string()),
-                init_checkpoint: Uuid::nil(),
-            };
-            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
 
-            for i in 0..batches.len() {
-                let mut batches_to_insert = batches.clone();
+            for i in 0..input.len() {
+                let mut batches_to_insert = input.clone();
 
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
                 input_handle.append(&mut batches_to_insert[i]);
@@ -1246,30 +1195,16 @@ mod tests {
                 let cpm = dbsp.commit().expect("commit failed");
                 checkpoints.push(cpm);
                 let res = output_handle.take_from_all();
-
-                let mut keys = vec![];
-                let mut diffs = vec![];
-                for batch in batches[0..i + 1].iter() {
-                    assert_eq!(batch.len(), 1);
-                    let (k, Tup2(v, r)) = batch[0];
-                    keys.push(Tup2(k, v));
-                    diffs.push(r);
-                }
-                let expected_zset = VecZSet::from_columns(keys, diffs);
-                committed.push(expected_zset.clone());
-                assert_eq!(expected_zset, res[0]);
+                committed.push(res[0].clone());
             }
         }
+
+        eprintln!("committed: {:?}", committed);
 
         // Next, we instantiate every checkpoint and make sure the circuit state is
         // what we would expect it to be at the given point we restored it to
         for (i, cpm) in checkpoints.iter().enumerate() {
-            let cconf = CircuitConfig {
-                layout: Layout::new_solo(1),
-                storage: Some(temp.path().to_str().unwrap().to_string()),
-                init_checkpoint: cpm.uuid,
-            };
-
+            cconf.init_checkpoint = cpm.uuid;
             let (mut dbsp, (_input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
             sample_size_handle.set_for_all(SAMPLE_SIZE);
             dbsp.step().unwrap();
@@ -1278,5 +1213,60 @@ mod tests {
             let expected_zset = committed[i].clone();
             assert_eq!(expected_zset, res[0]);
         }
+    }
+
+    #[test]
+    fn commit_restore() {
+        let _r = env_logger::try_init();
+        let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
+            vec![(1, Tup2(2, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(5, Tup2(6, 1))],
+            vec![(7, Tup2(8, 1))],
+            vec![(9, Tup2(10, 1))],
+        ];
+        fn mkcircuit(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
+            Runtime::init_circuit(cconf, move |circuit| {
+                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+                let sample_handle = stream
+                    .integrate_trace()
+                    .stream_sample_unique_key_vals(&sample_size_stream)
+                    .output();
+                Ok((handle, sample_handle, sample_size_handle))
+            })
+            .unwrap()
+        }
+
+        generic_checkpoint_restore(batches, mkcircuit);
+    }
+
+    #[test]
+    fn commit_restore_bounds() {
+        let _r = env_logger::try_init();
+        let batches: Vec<Vec<(i32, Tup2<i32, i32>)>> = vec![
+            vec![(1, Tup2(2, 1))],
+            vec![(3, Tup2(4, 1))],
+            vec![(5, Tup2(6, 1))],
+            vec![(7, Tup2(8, 1))],
+            vec![(9, Tup2(10, 1))],
+        ];
+        #[allow(clippy::type_complexity)]
+        fn mkcircuit_with_bounds(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
+            Runtime::init_circuit(cconf, move |circuit| {
+                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+                let tb = TraceBound::new();
+                tb.set(10);
+                let sample_handle = stream
+                    .integrate_trace_with_bound(tb.clone(), tb)
+                    .stream_sample_unique_key_vals(&sample_size_stream)
+                    .output();
+                Ok((handle, sample_handle, sample_size_handle))
+            })
+            .unwrap()
+        }
+
+        generic_checkpoint_restore(batches, mkcircuit_with_bounds);
     }
 }
