@@ -103,6 +103,29 @@ pub enum StorageError {
     /// Read ended before the full request length.
     #[error("The read would have returned less data than requested.")]
     ShortRead,
+
+    /// Storage location not found.
+    #[error("The requested (base) directory for storage does not exist.")]
+    StorageLocationNotFound,
+
+    /// A process already locked the provided storage directory.
+    #[error(
+        "A process with the provided PID is already using the provided storage directory. \
+If this is not expected, please remove the lock file manually, after verifying \
+that the process with the given PID no longer exists."
+    )]
+    StorageLocked(u32, PathBuf),
+
+    /// Unable to lock the PID file for the storage directory.
+    #[error(
+        "Unable to lock the PID file ({1:?}) for the storage directory. \
+This means another pipeline started and tried to lock it at the same time."
+    )]
+    UnableToLockPidFile(i32, PathBuf),
+
+    /// Unknown checkpoint specified in configuration.
+    #[error("Couldn't find the specified checkpoint directory ({0:?}) in the storage directory.")]
+    CheckpointNotFound(PathBuf),
 }
 
 impl Serialize for StorageError {

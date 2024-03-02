@@ -73,7 +73,6 @@ dbsp::declare_tuples! {
 
 #[test]
 fn csv_test() {
-    let src = read_csv::<Tuple3<bool, Option<String>, Option<u32>>, i64>("src/test.csv");
     assert_eq!(
         zset!(
             Tuple3::new(true, Some(String::from("Mihai")),Some(0)) => 1,

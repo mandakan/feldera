@@ -300,7 +300,8 @@ mod tests {
             for _ in 0..3 {
                 circuit.step().unwrap();
             }
-        });
+        })
+        .expect("failed to start runtime");
 
         hruntime.join().unwrap();
     }

@@ -1,3 +1,4 @@
+use crate::circuit::checkpointer::{CheckpointMetadata, Checkpointer};
 use crate::{
     circuit::runtime::RuntimeHandle, profile::Profiler, Error as DBSPError, RootCircuit, Runtime,
     RuntimeError, SchedulerError,
@@ -6,13 +7,11 @@ use anyhow::Error as AnyError;
 use core::fmt;
 use crossbeam::channel::{bounded, Receiver, Select, Sender, TryRecvError};
 use itertools::Either;
-use rkyv::{Archive, Deserialize, Serialize};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     error::Error as StdError,
     fmt::{Debug, Display, Error as FmtError, Formatter},
-    fs::{self, create_dir_all, File},
-    io::Write,
+    fs::{self, create_dir_all},
     iter::empty,
     net::SocketAddr,
     ops::Range,
@@ -422,7 +421,7 @@ impl Runtime {
                     }
                 }
             }
-        });
+        })?;
 
         // Receive initialization status from all workers.
 
@@ -480,18 +479,6 @@ enum Response {
     CheckpointCreated,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Archive)]
-pub struct CheckpointMetadata {
-    /// A unique identifier for the given checkpoint.
-    ///
-    /// This is used to identify the checkpoint in the file-system hierarchy.
-    pub uuid: Uuid,
-    /// An optional, user-defined name for the checkpoint.
-    pub identifier: Option<String>,
-    /// Which step the circuit was executing when the checkpoint was created.
-    pub step_id: u64,
-}
-
 /// A handle to control the execution of a circuit in a multithreaded runtime.
 #[derive(Debug)]
 pub struct DBSPHandle {
@@ -504,36 +491,28 @@ pub struct DBSPHandle {
     // workers.
     status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     step_id: u64,
-    storage_path: PathBuf,
-    checkpoint_list: VecDeque<CheckpointMetadata>,
+    checkpointer: Checkpointer,
 }
 
 impl DBSPHandle {
-    /// We keep at least this many checkpoints around.
-    const MIN_CHECKPOINT_THRESHOLD: usize = 2;
-    /// Name of the checkpoint list file.
-    ///
-    /// File will be stored inside the runtime storage directory with this
-    /// name.
-    const CHECKPOINT_FILE_NAME: &'static str = "checkpoints.feldera";
-
     fn new(
         runtime: RuntimeHandle,
         command_senders: Vec<Sender<Command>>,
         status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     ) -> Self {
         let storage_path = runtime.runtime().storage_path();
-        let checkpoint_list = Self::try_read_checkpoints_from_file(&storage_path)
-            .expect("failed to read checkpoint list from file");
-        Self {
+        let checkpointer = Checkpointer::new(storage_path.clone());
+
+        let dbsp_handle = Self {
             start_time: Instant::now(),
             runtime: Some(runtime),
             command_senders,
             status_receivers,
             step_id: 0,
-            storage_path,
-            checkpoint_list,
-        }
+            checkpointer,
+        };
+        dbsp_handle.startup_gc();
+        dbsp_handle
     }
 
     fn kill_inner(&mut self) -> ThreadResult<()> {
@@ -614,40 +593,6 @@ impl DBSPHandle {
         self.broadcast_command(Command::Step, |_, _| {})
     }
 
-    fn try_read_checkpoints_from_file<P: AsRef<Path>>(
-        storage_path: P,
-    ) -> Result<VecDeque<CheckpointMetadata>, DBSPError> {
-        let checkpoint_file_path = storage_path
-            .as_ref()
-            .to_path_buf()
-            .join(Self::CHECKPOINT_FILE_NAME);
-        if !checkpoint_file_path.exists() {
-            return Ok(VecDeque::new());
-        }
-        let content = fs::read(checkpoint_file_path).expect("Checkpoint file should exists.");
-        let archived = unsafe { rkyv::archived_root::<VecDeque<CheckpointMetadata>>(&content) };
-        let checkpoint_list: VecDeque<CheckpointMetadata> =
-            archived.deserialize(&mut rkyv::Infallible).unwrap();
-        Ok(checkpoint_list)
-    }
-
-    fn update_checkpoint_file(&self) -> Result<(), DBSPError> {
-        let checkpoint_file =
-            self.storage_path
-                .join(format!("{}{}", Self::CHECKPOINT_FILE_NAME, ".mut"));
-        eprintln!("checkpoint_file: {:?}", checkpoint_file);
-
-        // write checkpoint list to a file:
-        let as_bytes = feldera_storage::file::to_bytes(&self.checkpoint_list)
-            .expect("failed to serialize checkpoint-list data");
-        let mut f = File::create(&checkpoint_file)?;
-        f.write_all(as_bytes.as_slice())?;
-        f.sync_all()?;
-        fs::rename(&checkpoint_file, checkpoint_file.with_extension(""))?;
-
-        Ok(())
-    }
-
     /// Create a new checkpoint by taking consistent snapshot of the state in
     /// dbsp.
     pub fn commit(&mut self) -> Result<CheckpointMetadata, DBSPError> {
@@ -663,139 +608,43 @@ impl DBSPHandle {
         self.commit_as(Uuid::now_v7(), Some(name.into()))
     }
 
-    fn commit_as(
-        &mut self,
-        uuid: Uuid,
-        identifier: Option<String>,
-    ) -> Result<CheckpointMetadata, DBSPError> {
-        let commit_dir = self.storage_path.join(uuid.to_string());
-        create_dir_all(commit_dir)?;
-
+    /// Used by the checkpointer to initiate a commit on the circuit.
+    pub(super) fn send_commit(&mut self, uuid: Uuid) -> Result<u64, DBSPError> {
         self.broadcast_command(Command::Commit(uuid), |_, _| {})?;
         // TODO: I think broadcast_command is synchronous, we can just return
         // `self.step_id` directly.
         // TODO: we need to handle the case where the commit fails in one of the
         // worker threads. The `handler` seemed awkward to use so I ignored it for now.
+        Ok(self.step_id)
+    }
 
-        let md = CheckpointMetadata {
-            uuid,
-            identifier,
-            step_id: self.step_id,
-        };
-        self.checkpoint_list.push_back(md.clone());
-        self.update_checkpoint_file()?;
-
+    fn commit_as(
+        &mut self,
+        uuid: Uuid,
+        identifier: Option<String>,
+    ) -> Result<CheckpointMetadata, DBSPError> {
+        self.checkpointer.create_checkpoint_dir(uuid)?;
+        let step_id = self.send_commit(uuid)?;
+        let md = self.checkpointer.commit(uuid, identifier, step_id)?;
         Ok(md)
     }
 
     /// List all currently available checkpoints.
     pub fn list_checkpoints(&mut self) -> Result<Vec<CheckpointMetadata>, DBSPError> {
-        Ok(self.checkpoint_list.clone().into())
+        self.checkpointer.list_checkpoints()
     }
 
-    fn gather_batches_for_checkpoint(
-        &self,
-        cpm: &CheckpointMetadata,
-    ) -> Result<HashSet<String>, DBSPError> {
-        assert_ne!(cpm.uuid, Uuid::nil());
-        let mut batch_files_in_commit: HashSet<String> = HashSet::new();
-        let cp_spine_file_prefix = format!("pspine-batches-{}", cpm.uuid);
-
-        let files = fs::read_dir(&self.storage_path)?;
-        for file in files {
-            let file = file?;
-            let path = file.path();
-            let file_name = path.file_name().unwrap().to_string_lossy();
-
-            if file_name.starts_with(&cp_spine_file_prefix) {
-                let content = fs::read(file.path())?;
-                let archived = rkyv::check_archived_root::<Vec<String>>(&content).unwrap();
-                archived.iter().for_each(|s| {
-                    batch_files_in_commit.insert(s.to_string());
-                });
-            }
-        }
-        Ok(batch_files_in_commit)
-    }
-
-    /// Removes all the files in `files` from the storage base directory.
-    fn remove_batch_files<P: AsRef<Path>>(&self, files: &Vec<P>) -> Result<(), DBSPError> {
-        for file in files {
-            assert!(file.as_ref().is_file());
-            assert!(
-                file.as_ref().starts_with(&self.storage_path),
-                "File {} is not in the storage directory",
-                file.as_ref().display()
-            );
-            match fs::remove_file(file) {
-                Ok(_) => {
-                    log::debug!("Removed file {}", file.as_ref().display());
-                }
-                Err(e) => {
-                    log::warn!("Unable to remove old-checkpoint file {}: {} (the pipeline will try to delete the file again on a restart)", file.as_ref().display(), e);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Removes all meta-data files associated with the checkpoint given by
-    /// `cpm` by removing the folder associated with the checkpoint.
-    fn remove_checkpoint_dir(&self, cpm: &CheckpointMetadata) -> Result<(), DBSPError> {
-        assert_ne!(cpm.uuid, Uuid::nil());
-        let checkpoint_dir = self.storage_path.join(cpm.uuid.to_string());
-        if !checkpoint_dir.exists() {
-            log::warn!(
-                "Tried to remove a checkpoint directory {} that does not exist",
-                checkpoint_dir.display()
-            );
-            return Ok(());
-        }
-        fs::remove_dir_all(checkpoint_dir)?;
-        Ok(())
-    }
+    /// Garbage collect any old files that are no longer needed on startup.
+    fn startup_gc(&self) {}
 
     /// Remove the oldest checkpoint from the list.
     ///
     /// # Returns
     /// - Metadata of the removed checkpoint, if there are more than
-    ///   `MIN_CHECKPOINT_THRESHOLD`
+    ///   [`Checkpoint::MIN_CHECKPOINT_THRESHOLD`]
     /// - None otherwise.
     pub fn gc_checkpoint(&mut self) -> Result<Option<CheckpointMetadata>, DBSPError> {
-        // Ensures that we can unwrap the call to pop_front, and front later:
-        static_assertions::const_assert!(DBSPHandle::MIN_CHECKPOINT_THRESHOLD >= 2);
-        if self.checkpoint_list.len() > DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
-            let cp_to_remove = self.checkpoint_list.pop_front().unwrap();
-            let next_to_remove = self.checkpoint_list.front().unwrap();
-
-            // Update the checkpoint list file, we do this first intentionally, in case
-            // later operations fail we don't want the checkpoint list to
-            // contain a checkpoint that only has part of the files.
-            //
-            // If any of the later operations fail, restarting the circuit will try
-            // to remove the checkpoint files again (see also TODO).
-            self.update_checkpoint_file()?;
-
-            let potentially_remove = self.gather_batches_for_checkpoint(&cp_to_remove)?;
-            let need_to_keep = self.gather_batches_for_checkpoint(next_to_remove)?;
-
-            let to_remove = potentially_remove
-                .difference(&need_to_keep)
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-
-            eprintln!(
-                "cp_to_remove={} potentially_remove {:?} need_to_keep {:?} to_remove: {:?}",
-                cp_to_remove.step_id, potentially_remove, need_to_keep, to_remove
-            );
-
-            self.remove_batch_files(&to_remove)?;
-            self.remove_checkpoint_dir(&cp_to_remove)?;
-
-            Ok(Some(cp_to_remove))
-        } else {
-            Ok(None)
-        }
+        self.checkpointer.gc_checkpoint()
     }
 
     /// Enable CPU profiler.
@@ -876,10 +725,12 @@ impl Drop for DBSPHandle {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::fs::create_dir_all;
     use std::io;
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::circuit::checkpointer::Checkpointer;
     use crate::circuit::{CircuitConfig, Layout};
     use crate::operator::trace::TraceBound;
     use crate::operator::Generator;
@@ -890,7 +741,8 @@ mod tests {
         Runtime, RuntimeError,
     };
     use anyhow::anyhow;
-    use tempfile::tempdir;
+    use feldera_storage::backend::StorageError;
+    use tempfile::{tempdir, TempDir};
     use uuid::Uuid;
 
     type CircuitHandle = (
@@ -1054,16 +906,37 @@ mod tests {
         .unwrap()
     }
 
-    /// If we call commit, we should preserve the checkpoint list across circuit
-    /// restarts.
-    #[test]
-    fn checkpoint_file() {
+    fn mkconfig() -> (TempDir, CircuitConfig) {
         let temp = tempdir().expect("Can't create temp dir for storage");
         let cconf = CircuitConfig {
             layout: Layout::new_solo(1),
             storage: Some(temp.path().to_str().unwrap().to_string()),
             init_checkpoint: Uuid::nil(),
         };
+        (temp, cconf)
+    }
+
+    /// Smoke test for `gather_batches_for_checkpoint`.
+    #[test]
+    fn can_find_batches_for_checkpoint() {
+        let (_temp, cconf) = mkconfig();
+        let (mut dbsp, (input_handle, _, _)) = mkcircuit(&cconf);
+        let mut batch = vec![(1, Tup2(2, 1))];
+        input_handle.append(&mut batch);
+        dbsp.step().unwrap();
+        let cpm = dbsp.commit().expect("commit failed");
+        let batchfiles = dbsp
+            .checkpointer
+            .gather_batches_for_checkpoint(&cpm)
+            .expect("failed to gather batches");
+        assert_eq!(batchfiles.len(), 1);
+    }
+
+    /// If we call commit, we should preserve the checkpoint list across circuit
+    /// restarts.
+    #[test]
+    fn checkpoint_file() {
+        let (_temp, cconf) = mkconfig();
 
         {
             let (mut dbsp, (_input_handle, _output_handle, sample_size_handle)) = mkcircuit(&cconf);
@@ -1076,18 +949,12 @@ mod tests {
 
         {
             let (mut dbsp, _) = mkcircuit(&cconf);
-            let cpm = dbsp
-                .checkpoint_list
-                .pop_front()
-                .expect("checkpoint list should not be empty");
+            let cpm = &dbsp.checkpointer.list_checkpoints().unwrap()[0];
             assert_eq!(cpm.step_id, 1);
             assert_ne!(cpm.uuid, Uuid::nil());
             assert_eq!(cpm.identifier, Some(String::from("test-commit")));
 
-            let cpm2 = dbsp
-                .checkpoint_list
-                .pop_front()
-                .expect("checkpoint list should not be empty");
+            let cpm2 = &dbsp.checkpointer.list_checkpoints().unwrap()[1];
             assert_eq!(cpm2.step_id, 2);
             assert_ne!(cpm2.uuid, Uuid::nil());
             assert_ne!(cpm2.uuid, cpm.uuid);
@@ -1095,18 +962,67 @@ mod tests {
         }
     }
 
+    /// We should fail if we instantiate a circuit with the same storage
+    /// directory twice.
+    #[test]
+    fn circuit_takes_ownership_of_storage_dir() {
+        let (_temp, cconf) = mkconfig();
+        let (_dbsp, _) = mkcircuit(&cconf);
+
+        let r = Runtime::init_circuit(cconf, |_circuit| Ok(()));
+        assert!(matches!(
+            r,
+            Err(DBSPError::Storage(StorageError::StorageLocked(_, _)))
+        ));
+    }
+
+    /// We should fail if we revert to a checkpoint that doesn't exist.
+    #[test]
+    fn revert_to_unknown_checkpoint() {
+        let (_temp, mut cconf) = mkconfig();
+        let (dbsp, _) = mkcircuit(&cconf);
+        drop(dbsp); // makes sure we can take ownership of storage dir again
+
+        cconf.init_checkpoint = Uuid::now_v7(); // this checkpoint doesn't exist
+
+        let res = Runtime::init_circuit(cconf, |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let sample_handle = stream
+                .integrate_trace()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            Ok((handle, sample_handle, sample_size_handle))
+        });
+        assert!(matches!(
+            res,
+            Err(DBSPError::Storage(StorageError::CheckpointNotFound(_)))
+        ));
+    }
+
+    /// We panic if we initialize to a partially complete checkpoint.
+    #[test]
+    #[should_panic]
+    fn revert_to_partial_checkpoint() {
+        let (temp, mut cconf) = mkconfig();
+        let (dbsp, _) = mkcircuit(&cconf);
+        drop(dbsp); // makes sure we can take ownership of storage dir again
+
+        cconf.init_checkpoint = Uuid::now_v7(); // A made-up checkpoint, that does not have the necessary files
+        let checkpoint_dir = temp.path().join(cconf.init_checkpoint.to_string());
+        create_dir_all(checkpoint_dir).expect("can't create checkpoint dir");
+
+        // Initializing this circuit again will panic because it won't find the
+        // necessary files in the checkpoint directory.
+        let (_dbsp, _) = mkcircuit(&cconf);
+    }
+
     /// Checks that we end up cleaning old checkpoints on disk after calling
     /// `gc_checkpoint`.
     #[test]
     fn gc_commits() {
         let _r = env_logger::try_init();
-
-        let temp = tempdir().expect("Can't create temp dir for storage");
-        let cconf = CircuitConfig {
-            layout: Layout::new_solo(1),
-            storage: Some(temp.path().to_str().unwrap().to_string()),
-            init_checkpoint: Uuid::nil(),
-        };
+        let (temp, cconf) = mkconfig();
 
         fn count_directory_entries<P: AsRef<Path>>(path: P) -> io::Result<usize> {
             let mut file_count = 0;
@@ -1140,13 +1056,13 @@ mod tests {
 
         let mut prev_count = count_directory_entries(temp.path()).unwrap();
         let num_checkpoints = dbsp.list_checkpoints().unwrap().len();
-        for _i in 0..num_checkpoints - DBSPHandle::MIN_CHECKPOINT_THRESHOLD {
+        for _i in 0..num_checkpoints - Checkpointer::MIN_CHECKPOINT_THRESHOLD {
             let _r = dbsp.gc_checkpoint();
             let count = count_directory_entries(temp.path()).unwrap();
             assert!(count < prev_count);
             prev_count = count;
         }
-        assert_eq!(prev_count, 9, "9 entries left");
+        assert_eq!(prev_count, 7, "7 entries left");
     }
 
     /// Utility function that runs a circuit and takes a checkpoint at every
@@ -1158,23 +1074,18 @@ mod tests {
         circuit_fun: fn(&CircuitConfig) -> (DBSPHandle, CircuitHandle),
     ) {
         const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
-        let temp = tempdir().expect("Can't create temp dir for storage");
-
-        let mut cconf = CircuitConfig {
-            layout: Layout::new_solo(1),
-            storage: Some(temp.path().to_str().unwrap().to_string()),
-            init_checkpoint: Uuid::nil(),
-        };
+        assert!(input.len() < SAMPLE_SIZE, "input should be <SAMPLE_SIZE");
+        let (_temp, mut cconf) = mkconfig();
 
         let mut committed = vec![];
         let mut checkpoints = vec![];
 
-        // We create a circuit and push data into it, we also take a checkpoint at very
-        // step
+        // We create a circuit and push data into it, we also take a checkpoint at every
+        // step.
         {
             let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
             for mut batch in input.clone() {
-                let cpm = dbsp.commit().expect("commit failed");
+                let cpm = dbsp.commit().expect("commit shouldn't fail");
                 checkpoints.push(cpm);
 
                 sample_size_handle.set_for_all(SAMPLE_SIZE);
@@ -1185,9 +1096,7 @@ mod tests {
                 committed.push(res[0].clone());
             }
         }
-
         assert_eq!(committed.len(), input.len());
-        eprintln!("committed: {:?}", committed);
 
         // Next, we instantiate every checkpoint and make sure the circuit state is
         // what we would expect it to be at the given point we restored it to
@@ -1205,6 +1114,7 @@ mod tests {
         }
     }
 
+    /// Make sure we can take checkpoints of a simple spine and restore them.
     #[test]
     fn commit_restore() {
         let _r = env_logger::try_init();
@@ -1219,6 +1129,8 @@ mod tests {
         generic_checkpoint_restore(batches, mkcircuit);
     }
 
+    /// Make sure we can take checkpoints of a spine with a trace bound and
+    /// restore them.
     #[test]
     fn commit_restore_bounds() {
         let _r = env_logger::try_init();

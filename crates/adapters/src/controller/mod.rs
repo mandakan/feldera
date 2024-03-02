@@ -62,6 +62,7 @@ use std::{
     thread::{spawn, JoinHandle},
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 mod error;
 mod stats;
@@ -422,7 +423,7 @@ impl Controller {
         let config = CircuitConfig {
             layout: Layout::new_solo(controller.status.pipeline_config.global.workers as usize),
             storage: controller.status.pipeline_config.storage_location.clone(),
-            init_checkpoint: 0,
+            init_checkpoint: Uuid::nil(),
         };
         let mut circuit = match circuit_factory(config) {
             Ok((circuit, catalog)) => {

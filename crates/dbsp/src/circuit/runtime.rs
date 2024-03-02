@@ -1,10 +1,12 @@
 //! A multithreaded runtime for evaluating DBSP circuits in a data-parallel
 //! fashion.
 
+use crate::error::Error as DBSPError;
 use crate::trace::ord::file::StorageBackend;
 use crate::DetailedError;
 use crossbeam::channel::bounded;
 use crossbeam_utils::sync::{Parker, Unparker};
+use feldera_storage::backend::StorageError;
 use feldera_storage::buffer_cache::BufferCache;
 use feldera_storage::dirlock::LockedDirectory;
 use feldera_storage::file::cache::FileCacheEntry;
@@ -238,35 +240,50 @@ impl Debug for RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(layout: Layout, storage: Option<String>, start_checkpoint: Uuid) -> Self {
+    fn new(
+        layout: Layout,
+        storage: Option<String>,
+        start_checkpoint: Uuid,
+    ) -> Result<Self, DBSPError> {
         let local_workers = layout.local_workers().len();
         let mut panic_info = Vec::with_capacity(local_workers);
         for _ in 0..local_workers {
             panic_info.push(RwLock::new(None));
         }
-        let storage = storage.map_or_else(
+        let storage: Result<StorageLocation, DBSPError> = storage.map_or_else(
             // Note that we use into_path() here which avoids deleting the temporary directory
             // we still clean it up when the runtime is dropped -- but keep it around on panic.
             || {
                 if start_checkpoint != Uuid::nil() {
                     panic!("Cannot specify a checkpoint without a storage location");
                 }
-                StorageLocation::Temporary(tempfile::tempdir().unwrap().into_path())
-            },
-            |s| {
-                StorageLocation::Permanent(LockedDirectory::new(s).expect(
-                    "Failed to create pidfile for storage directory, is it already in use?",
+                Ok(StorageLocation::Temporary(
+                    tempfile::tempdir().unwrap().into_path(),
                 ))
             },
+            |s| {
+                let locked_path = LockedDirectory::new(s)?;
+                Ok(StorageLocation::Permanent(locked_path))
+            },
         );
+        let storage = storage?;
 
-        Self {
+        // Check if the start checkpoint exists, maybe this logic should be part of
+        // checkpointer, but there is a chicken-egg problem during initialization.
+        let checkpoint_dir = storage.as_ref().join(start_checkpoint.to_string());
+        if start_checkpoint != Uuid::nil() && !checkpoint_dir.exists() && !checkpoint_dir.is_dir() {
+            return Err(DBSPError::Storage(StorageError::CheckpointNotFound(
+                checkpoint_dir,
+            )));
+        }
+
+        Ok(Self {
             layout,
             storage,
             start_checkpoint,
             store: TypedDashMap::new(),
             panic_info,
-        }
+        })
     }
 }
 
@@ -350,13 +367,14 @@ impl Runtime {
     ///     for _ in 0..100 {
     ///         root.step().unwrap();
     ///     }
-    /// });
+    /// })
+    /// .unwrap();
     ///
     /// // Wait for all worker threads to terminate.
     /// hruntime.join().unwrap();
     /// # }
     /// ```
-    pub fn run<F>(cconf: impl IntoCircuitConfig, circuit: F) -> RuntimeHandle
+    pub fn run<F>(cconf: impl IntoCircuitConfig, circuit: F) -> Result<RuntimeHandle, DBSPError>
     where
         F: FnOnce() + Clone + Send + 'static,
     {
@@ -365,7 +383,7 @@ impl Runtime {
         let workers = layout.local_workers();
         let nworkers = workers.len();
         let checkpoint = cconf.start_checkpoint();
-        let runtime = Self(Arc::new(RuntimeInner::new(layout, storage, checkpoint)));
+        let runtime = Self(Arc::new(RuntimeInner::new(layout, storage, checkpoint)?));
 
         // Install custom panic hook.
         let default_hook = default_panic_hook();
@@ -411,7 +429,7 @@ impl Runtime {
             WorkerHandle::new(handle, unparker, kill_signal)
         }));
 
-        RuntimeHandle::new(runtime, workers)
+        Ok(RuntimeHandle::new(runtime, workers))
     }
 
     /// Returns a reference to the multithreaded runtime that
@@ -701,7 +719,8 @@ mod tests {
         let hruntime = Runtime::run(cconf, move || {
             let runtime = Runtime::runtime().unwrap();
             assert_eq!(runtime.storage_path(), path_clone);
-        });
+        })
+        .expect("failed to start runtime");
         hruntime.join().unwrap();
         assert!(path.exists(), "persistent storage is not cleaned up");
     }
@@ -721,7 +740,8 @@ mod tests {
         let hruntime = Runtime::run(cconf, move || {
             let runtime = Runtime::runtime().unwrap();
             *storage_path_clone.lock().unwrap() = Some(runtime.storage_path());
-        });
+        })
+        .expect("failed to start runtime");
 
         hruntime.join().unwrap();
         let storage_path = storage_path.lock().unwrap().take().unwrap();
@@ -743,7 +763,8 @@ mod tests {
             let runtime = Runtime::runtime().unwrap();
             *storage_path_clone.lock().unwrap() = Some(runtime.storage_path());
             panic!("oh no");
-        });
+        })
+        .expect("failed to start runtime");
         sleep(Duration::from_millis(100));
         hruntime.kill().expect_err("kill shouldn't have worked");
 
@@ -779,7 +800,8 @@ mod tests {
             }
 
             assert_eq!(&*data.borrow(), &(0..100).collect::<Vec<usize>>());
-        });
+        })
+        .expect("failed to start runtime");
 
         hruntime.join().unwrap();
     }
@@ -826,7 +848,8 @@ mod tests {
                     return;
                 }
             }
-        });
+        })
+        .expect("failed to start runtime");
 
         sleep(Duration::from_millis(100));
         hruntime.kill().unwrap();

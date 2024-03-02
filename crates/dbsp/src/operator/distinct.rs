@@ -793,7 +793,8 @@ mod test {
     fn do_distinct_inc_test_mt(workers: usize) {
         let hruntime = Runtime::run(workers, || {
             distinct_inc_test();
-        });
+        })
+        .expect("failed to start runtime");
 
         hruntime.join().unwrap();
     }

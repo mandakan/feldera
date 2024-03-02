@@ -22,6 +22,7 @@ pub(crate) mod runtime;
 #[macro_use]
 pub mod metadata;
 pub mod cache;
+mod checkpointer;
 pub mod circuit_builder;
 pub mod operator_traits;
 pub mod schedule;
