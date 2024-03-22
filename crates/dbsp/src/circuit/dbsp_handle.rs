@@ -511,7 +511,6 @@ impl DBSPHandle {
             step_id: 0,
             checkpointer,
         };
-        dbsp_handle.startup_gc();
         dbsp_handle
     }
 
@@ -634,9 +633,6 @@ impl DBSPHandle {
         self.checkpointer.list_checkpoints()
     }
 
-    /// Garbage collect any old files that are no longer needed on startup.
-    fn startup_gc(&self) {}
-
     /// Remove the oldest checkpoint from the list.
     ///
     /// # Returns
@@ -725,7 +721,7 @@ impl Drop for DBSPHandle {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::fs::create_dir_all;
+    use std::fs::{create_dir_all, File};
     use std::io;
     use std::path::Path;
     use std::time::Duration;
@@ -916,6 +912,55 @@ mod tests {
         (temp, cconf)
     }
 
+    /// Utility function that runs a circuit and takes a checkpoint at every
+    /// step. It then restores the circuit to every checkpoint and checks that
+    /// the state is consistent with what we would expect it to be at that
+    /// point.
+    fn generic_checkpoint_restore(
+        input: Vec<Vec<(i32, Tup2<i32, i32>)>>,
+        circuit_fun: fn(&CircuitConfig) -> (DBSPHandle, CircuitHandle),
+    ) {
+        const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
+        assert!(input.len() < SAMPLE_SIZE, "input should be <SAMPLE_SIZE");
+        let (_temp, mut cconf) = mkconfig();
+
+        let mut committed = vec![];
+        let mut checkpoints = vec![];
+
+        // We create a circuit and push data into it, we also take a checkpoint at every
+        // step.
+        {
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
+            for mut batch in input.clone() {
+                let cpm = dbsp.commit().expect("commit shouldn't fail");
+                checkpoints.push(cpm);
+
+                sample_size_handle.set_for_all(SAMPLE_SIZE);
+                input_handle.append(&mut batch);
+                dbsp.step().unwrap();
+
+                let res = output_handle.take_from_all();
+                committed.push(res[0].clone());
+            }
+        }
+        assert_eq!(committed.len(), input.len());
+
+        // Next, we instantiate every checkpoint and make sure the circuit state is
+        // what we would expect it to be at the given point we restored it to
+        let mut batches_to_insert = input.clone();
+        for (i, cpm) in checkpoints.iter().enumerate() {
+            cconf.init_checkpoint = cpm.uuid;
+            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
+            sample_size_handle.set_for_all(SAMPLE_SIZE);
+            input_handle.append(&mut batches_to_insert[i]);
+            dbsp.step().unwrap();
+
+            let res = output_handle.take_from_all();
+            let expected_zset = committed[i].clone();
+            assert_eq!(expected_zset, res[0]);
+        }
+    }
+
     /// Smoke test for `gather_batches_for_checkpoint`.
     #[test]
     fn can_find_batches_for_checkpoint() {
@@ -1065,53 +1110,32 @@ mod tests {
         assert_eq!(prev_count, 7, "7 entries left");
     }
 
-    /// Utility function that runs a circuit and takes a checkpoint at every
-    /// step. It then restores the circuit to every checkpoint and checks that
-    /// the state is consistent with what we would expect it to be at that
-    /// point.
-    fn generic_checkpoint_restore(
-        input: Vec<Vec<(i32, Tup2<i32, i32>)>>,
-        circuit_fun: fn(&CircuitConfig) -> (DBSPHandle, CircuitHandle),
-    ) {
-        const SAMPLE_SIZE: usize = 25; // should be bigger than #keys
-        assert!(input.len() < SAMPLE_SIZE, "input should be <SAMPLE_SIZE");
-        let (_temp, mut cconf) = mkconfig();
+    /// Make sure that leftover files from uncompleted checkpoints that were
+    /// written during a previous run are cleaned up when we start a new
+    /// circuit with this storage directory.
+    #[test]
+    fn gc_on_startup() {
+        let _r = env_logger::try_init();
 
-        let mut committed = vec![];
-        let mut checkpoints = vec![];
+        let (temp, cconf) = mkconfig();
+        let (dbsp, _) = mkcircuit(&cconf);
+        drop(dbsp);
 
-        // We create a circuit and push data into it, we also take a checkpoint at every
-        // step.
-        {
-            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = circuit_fun(&cconf);
-            for mut batch in input.clone() {
-                let cpm = dbsp.commit().expect("commit shouldn't fail");
-                checkpoints.push(cpm);
+        let incomplete_batch_path = temp.path().join("incomplete_batch.mut");
+        let _ = File::create(&incomplete_batch_path).expect("can't create file");
 
-                sample_size_handle.set_for_all(SAMPLE_SIZE);
-                input_handle.append(&mut batch);
-                dbsp.step().unwrap();
+        let incomplete_checkpoint_dir = temp.path().join(Uuid::now_v7().to_string());
+        let _ = fs::create_dir(&incomplete_checkpoint_dir).expect("can't create checkpoint dir");
 
-                let res = output_handle.take_from_all();
-                committed.push(res[0].clone());
-            }
-        }
-        assert_eq!(committed.len(), input.len());
+        let complete_batch_unused = temp.path().join("complete_batch.feldera");
+        let _ = File::create(&complete_batch_unused).expect("can't create file");
 
-        // Next, we instantiate every checkpoint and make sure the circuit state is
-        // what we would expect it to be at the given point we restored it to
-        let mut batches_to_insert = input.clone();
-        for (i, cpm) in checkpoints.iter().enumerate() {
-            cconf.init_checkpoint = cpm.uuid;
-            let (mut dbsp, (input_handle, output_handle, sample_size_handle)) = mkcircuit(&cconf);
-            sample_size_handle.set_for_all(SAMPLE_SIZE);
-            input_handle.append(&mut batches_to_insert[i]);
-            dbsp.step().unwrap();
-
-            let res = output_handle.take_from_all();
-            let expected_zset = committed[i].clone();
-            assert_eq!(expected_zset, res[0]);
-        }
+        // Initializing this circuit again will panic because it won't find the
+        // necessary files in the checkpoint directory.
+        let (_dbsp, _) = mkcircuit(&cconf);
+        assert!(!incomplete_checkpoint_dir.exists());
+        assert!(!incomplete_batch_path.exists());
+        assert!(!complete_batch_unused.exists());
     }
 
     /// Make sure we can take checkpoints of a simple spine and restore them.

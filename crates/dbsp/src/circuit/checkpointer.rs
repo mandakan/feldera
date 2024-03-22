@@ -21,7 +21,7 @@ pub struct CheckpointMetadata {
     pub uuid: Uuid,
     /// An optional, user-defined name for the checkpoint.
     pub identifier: Option<String>,
-    /// Which step the circuit was executing when the checkpoint was created.
+    /// Which `step` the circuit was at when the checkpoint was created.
     pub step_id: u64,
 }
 
@@ -35,7 +35,7 @@ impl CheckpointMetadata {
     }
 }
 
-/// A checkpointer is responsible for managing the creation, and removal of
+/// A "checkpointer" is responsible for the creation, and removal of
 /// checkpoints for a circuit.
 ///
 /// It handles list of available checkpoints, and the files associated
@@ -54,14 +54,82 @@ impl Checkpointer {
     /// File will be stored inside the runtime storage directory with this
     /// name.
     const CHECKPOINT_FILE_NAME: &'static str = "checkpoints.feldera";
+    /// A slice of all file-extension the system can create.
+    const DBSP_FILE_EXTENSION: &'static [&'static str] = &["mut", "feldera"];
 
     pub fn new(storage_path: PathBuf) -> Self {
-        let checkpoint_list = Self::try_read_checkpoints_from_file(&storage_path)
-            .expect("failed to read checkpoint list from file");
-        Checkpointer {
+        let checkpoint_list =
+            Self::try_read_checkpoints_from_file(&storage_path).unwrap_or_else(|_| {
+                panic!(
+                    "The checkpoint file in '{}' should be valid",
+                    storage_path.display()
+                )
+            });
+
+        let cp = Checkpointer {
             storage_path,
             checkpoint_list,
+        };
+        //cp.gc_startup().unwrap_or_else(|_| {
+        //    panic!(
+        //        "Failed to clean up old checkpoint files in '{}'",
+        //        cp.storage_path.display()
+        //    )
+        //});
+
+        cp
+    }
+
+    pub(super) fn gc_startup(&self) -> Result<(), Error> {
+        // Collect all directories and files still referenced by a checkpoint
+        let mut in_use_paths: HashSet<PathBuf> = HashSet::new();
+        for cpm in self.checkpoint_list.iter() {
+            in_use_paths.insert(self.storage_path.join(cpm.uuid.to_string()));
+            let batches = self
+                .gather_batches_for_checkpoint(&cpm)
+                .expect("Batches for a checkpoint should be discoverable");
+            for batch in batches {
+                in_use_paths.insert(self.storage_path.join(batch));
+            }
         }
+
+        // Collect everything found in the storage directory
+        let mut all_paths: HashSet<PathBuf> = HashSet::new();
+        let files = fs::read_dir(&self.storage_path)?;
+        for file in files {
+            let file = file?;
+            let path = file.path();
+            all_paths.insert(path);
+        }
+
+        // Remove everything that is not referenced by a checkpoint
+        let to_remove = all_paths.difference(&in_use_paths);
+        for path in to_remove {
+            if Checkpointer::DBSP_FILE_EXTENSION.contains(
+                &path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or_default(),
+            ) || path.is_dir()
+            {
+                if path.is_dir() {
+                    log::debug!("Removing unused directory '{}'", path.display());
+                    fs::remove_dir_all(path)?;
+                } else {
+                    match fs::remove_file(path) {
+                        Ok(_) => {
+                            log::debug!("Removed unused file '{}'", path.display());
+                        }
+                        Err(e) => {
+                            log::warn!("Unable to remove old-checkpoint file {}: {} (the pipeline will try to delete the file again on a restart)", path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(super) fn create_checkpoint_dir(&self, uuid: Uuid) -> Result<(), Error> {
@@ -186,7 +254,7 @@ impl Checkpointer {
         let checkpoint_dir = self.storage_path.join(cpm.uuid.to_string());
         if !checkpoint_dir.exists() {
             log::warn!(
-                "Tried to remove a checkpoint directory {} that does not exist",
+                "Tried to remove a checkpoint directory '{}' that doesn't exist.",
                 checkpoint_dir.display()
             );
             return Ok(());
@@ -213,7 +281,7 @@ impl Checkpointer {
             // contain a checkpoint that only has part of the files.
             //
             // If any of the later operations fail, restarting the circuit will try
-            // to remove the checkpoint files again (see also [`Self::startup_gc`]).
+            // to remove the checkpoint files again (see also [`Self::gc_startup`]).
             self.update_checkpoint_file()?;
 
             let potentially_remove = self.gather_batches_for_checkpoint(&cp_to_remove)?;
