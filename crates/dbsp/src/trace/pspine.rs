@@ -715,7 +715,6 @@ where
         cid: Uuid,
         persistent_id: S,
     ) -> Self {
-        eprintln!("calling from_step_id {cid}");
         let mut spine = Self::with_effort(1, activator, String::from(persistent_id.as_ref()));
 
         if cid != Uuid::nil() {

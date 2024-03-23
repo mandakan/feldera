@@ -6,6 +6,7 @@ use crate::{
 use anyhow::Error as AnyError;
 use core::fmt;
 use crossbeam::channel::{bounded, Receiver, Select, Sender, TryRecvError};
+use hashbrown::HashMap;
 use itertools::Either;
 use std::{
     collections::HashSet,
@@ -406,6 +407,12 @@ impl Runtime {
                             return;
                         }
                     }
+                    Ok(Command::Fingerprint) => {
+                        let fip = circuit.fingerprint().expect("fingerprint failed");
+                        if status_sender.send(Ok(Response::Fingerprint(fip))).is_err() {
+                            return;
+                        }
+                    }
                     // Nothing to do: do some housekeeping and relinquish the CPU if there's none
                     // left.
                     Err(TryRecvError::Empty) => {
@@ -470,13 +477,16 @@ enum Command {
     DumpProfile,
     RetrieveProfile,
     Commit(Uuid),
+    Fingerprint,
 }
 
+#[derive(Debug)]
 enum Response {
     Unit,
     ProfileDump(String),
     Profile(WorkerProfile),
     CheckpointCreated,
+    Fingerprint(u64),
 }
 
 /// A handle to control the execution of a circuit in a multithreaded runtime.
@@ -492,6 +502,7 @@ pub struct DBSPHandle {
     status_receivers: Vec<Receiver<Result<Response, SchedulerError>>>,
     step_id: u64,
     checkpointer: Checkpointer,
+    fingerprint: Option<u64>,
 }
 
 impl DBSPHandle {
@@ -510,6 +521,7 @@ impl DBSPHandle {
             status_receivers,
             step_id: 0,
             checkpointer,
+            fingerprint: None,
         };
         dbsp_handle
     }
@@ -592,6 +604,37 @@ impl DBSPHandle {
         self.broadcast_command(Command::Step, |_, _| {})
     }
 
+    /// Used by the checkpointer to initiate a commit on the circuit.
+    fn send_fingerprint(&mut self) -> Result<u64, DBSPError> {
+        let mut fps: HashMap<usize, u64> = HashMap::new();
+        self.broadcast_command(Command::Fingerprint, |idx, res| {
+            if let Response::Fingerprint(fp) = res {
+                fps.insert(idx, fp);
+            } else {
+                panic!("Unexpected response: {:?}", res);
+            }
+        })?;
+
+        #[cfg(debug_assertions)]
+        for fp in fps.values() {
+            if *fp != *fps.values().next().unwrap() {
+                panic!("Fingerprints do not match: {:?}", fps);
+            }
+        }
+
+        Ok(fps.values().next().copied().unwrap_or_default())
+    }
+
+    pub fn fingerprint(&mut self) -> Result<u64, DBSPError> {
+        if let Some(fp) = self.fingerprint {
+            return Ok(fp);
+        } else {
+            let fp = self.send_fingerprint()?;
+            self.fingerprint = Some(fp);
+            Ok(fp)
+        }
+    }
+
     /// Create a new checkpoint by taking consistent snapshot of the state in
     /// dbsp.
     pub fn commit(&mut self) -> Result<CheckpointMetadata, DBSPError> {
@@ -618,9 +661,12 @@ impl DBSPHandle {
         uuid: Uuid,
         identifier: Option<String>,
     ) -> Result<CheckpointMetadata, DBSPError> {
+        let fingerprint = self.fingerprint()?;
         self.checkpointer.create_checkpoint_dir(uuid)?;
         let step_id = self.send_commit(uuid)?;
-        let md = self.checkpointer.commit(uuid, identifier, step_id)?;
+        let md = self
+            .checkpointer
+            .commit(uuid, identifier, fingerprint, step_id)?;
         Ok(md)
     }
 
@@ -898,6 +944,22 @@ mod tests {
         .unwrap()
     }
 
+    #[allow(clippy::type_complexity)]
+    fn mkcircuit_with_bounds(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
+        Runtime::init_circuit(cconf, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let tb = TraceBound::new();
+            tb.set(10);
+            let sample_handle = stream
+                .integrate_trace_with_bound(tb.clone(), tb)
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            Ok((handle, sample_handle, sample_size_handle))
+        })
+        .unwrap()
+    }
+
     fn mkconfig() -> (TempDir, CircuitConfig) {
         let temp = tempdir().expect("Can't create temp dir for storage");
         let cconf = CircuitConfig {
@@ -1114,7 +1176,10 @@ mod tests {
         let _r = env_logger::try_init();
 
         let (temp, cconf) = mkconfig();
-        let (dbsp, _) = mkcircuit(&cconf);
+        let (mut dbsp, (input_handle, _, _)) = mkcircuit(&cconf);
+        let mut batch: Vec<(i32, Tup2<i32, i32>)> = vec![(1, Tup2(2, 1))];
+        input_handle.append(&mut batch);
+        dbsp.commit().expect("commit shouldn't fail");
         drop(dbsp);
 
         let incomplete_batch_path = temp.path().join("incomplete_batch.mut");
@@ -1126,8 +1191,8 @@ mod tests {
         let complete_batch_unused = temp.path().join("complete_batch.feldera");
         let _ = File::create(&complete_batch_unused).expect("can't create file");
 
-        // Initializing this circuit again will panic because it won't find the
-        // necessary files in the checkpoint directory.
+        // Initializing this circuit again will remove the
+        // unnecessary files in the checkpoint directory.
         let (_dbsp, _) = mkcircuit(&cconf);
         assert!(!incomplete_checkpoint_dir.exists());
         assert!(!incomplete_batch_path.exists());
@@ -1161,22 +1226,42 @@ mod tests {
             vec![(12, Tup2(12, 1))],
             vec![(13, Tup2(13, 1))],
         ];
-        #[allow(clippy::type_complexity)]
-        fn mkcircuit_with_bounds(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
+
+        generic_checkpoint_restore(batches, mkcircuit_with_bounds);
+    }
+
+    #[test]
+    fn fingerprint_is_different() {
+        fn mkcircuit_different(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
             Runtime::init_circuit(cconf, move |circuit| {
                 let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
                 let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-                let tb = TraceBound::new();
-                tb.set(10);
                 let sample_handle = stream
-                    .integrate_trace_with_bound(tb.clone(), tb)
+                    .integrate_trace()
+                    .stream_sample_unique_key_vals(&sample_size_stream)
+                    .output();
+                let _sample_handle2 = stream
+                    .integrate_trace()
                     .stream_sample_unique_key_vals(&sample_size_stream)
                     .output();
                 Ok((handle, sample_handle, sample_size_handle))
             })
             .unwrap()
         }
+        let (_temp, cconf) = mkconfig();
+        let (mut dbsp, (_input_handle, _, _sample_size_handle)) = mkcircuit(&cconf);
+        let fid1 = dbsp.fingerprint().unwrap();
 
-        generic_checkpoint_restore(batches, mkcircuit_with_bounds);
+        let (_temp, cconf) = mkconfig();
+        let (mut dbsp, (_input_handle, _, _sample_size_handle)) = mkcircuit_different(&cconf);
+        let fid2 = dbsp.fingerprint().unwrap();
+        assert_ne!(fid1, fid2);
+
+        // Unfortunately, the fingerprint isn't perfect, e.g., it thinks these two
+        // circuits are the same:
+        let (_temp, cconf) = mkconfig();
+        let (mut dbsp, (_input_handle, _, _sample_size_handle)) = mkcircuit_with_bounds(&cconf);
+        let fid3 = dbsp.fingerprint().unwrap();
+        assert_eq!(fid1, fid3); // Ideally, should be assert_ne
     }
 }

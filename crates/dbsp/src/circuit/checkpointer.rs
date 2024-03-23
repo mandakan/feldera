@@ -21,15 +21,18 @@ pub struct CheckpointMetadata {
     pub uuid: Uuid,
     /// An optional, user-defined name for the checkpoint.
     pub identifier: Option<String>,
+    /// Fingerprint of the circuit at the time of the checkpoint.
+    pub fingerprint: u64,
     /// Which `step` the circuit was at when the checkpoint was created.
     pub step_id: u64,
 }
 
 impl CheckpointMetadata {
-    pub fn new(uuid: Uuid, identifier: Option<String>, step_id: u64) -> Self {
+    pub fn new(uuid: Uuid, identifier: Option<String>, fingerprint: u64, step_id: u64) -> Self {
         CheckpointMetadata {
             uuid,
             identifier,
+            fingerprint,
             step_id,
         }
     }
@@ -83,6 +86,13 @@ impl Checkpointer {
     /// Remove unexpected/leftover files from a previous run in the storage
     /// directory.
     fn gc_startup(&self) -> Result<(), Error> {
+        if self.checkpoint_list.is_empty() {
+            // This is a safety measure we take to ensure that we don't
+            // accidentally remove files just in case we fail to read the checkpoint
+            // file. We don't remove anything.
+            return Ok(());
+        }
+
         // Collect all directories and files still referenced by a checkpoint
         let mut in_use_paths: HashSet<PathBuf> = HashSet::new();
         in_use_paths.insert(self.storage_path.join(Checkpointer::CHECKPOINT_FILE_NAME));
@@ -145,11 +155,13 @@ impl Checkpointer {
         &mut self,
         uuid: Uuid,
         identifier: Option<String>,
+        fingerprint: u64,
         step_id: u64,
     ) -> Result<CheckpointMetadata, Error> {
         let md = CheckpointMetadata {
             uuid,
             identifier,
+            fingerprint,
             step_id,
         };
         self.checkpoint_list.push_back(md.clone());

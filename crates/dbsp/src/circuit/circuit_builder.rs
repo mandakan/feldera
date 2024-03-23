@@ -32,9 +32,11 @@ use crate::{
     trace::Batch,
     InputHandle, OutputHandle,
 };
+
 use crate::{
     circuit::{
         cache::{CircuitCache, CircuitStoreMarker},
+        fingerprinter::Fingerprinter,
         metadata::OperatorMeta,
         operator_traits::{
             BinaryOperator, BinarySinkOperator, Data, ImportOperator, NaryOperator,
@@ -55,6 +57,7 @@ use crate::{
 use anyhow::Error as AnyError;
 use serde::Serialize;
 use std::{
+    any::type_name_of_val,
     borrow::Cow,
     cell::{Ref, RefCell, RefMut, UnsafeCell},
     collections::HashMap,
@@ -795,6 +798,11 @@ pub trait Node {
     /// Instructs the node to commit the state of its inner operator to
     /// persistent storage.
     fn commit(&self, cid: Uuid) -> Result<(), DBSPError>;
+
+    /// Takes a fingerprint of the node's inner operator adds it to `fip`.
+    fn fingerprint(&self, fip: &mut Fingerprinter) {
+        fip.hash(type_name_of_val(self));
+    }
 }
 
 /// Id of an operator, guaranteed to be unique within a circuit.
@@ -4434,6 +4442,14 @@ impl CircuitHandle {
             node.commit(cid).expect("committed");
         });
         Ok(())
+    }
+
+    pub fn fingerprint(&mut self) -> Result<u64, SchedulerError> {
+        let mut fip = Fingerprinter::new();
+        self.circuit.map_nodes_recursive(&mut |node: &dyn Node| {
+            node.fingerprint(&mut fip);
+        });
+        Ok(fip.finish())
     }
 
     /// Attach a scheduler event handler to the circuit.
