@@ -42,6 +42,8 @@ pub enum Error {
         // reported panics.
         panic_info: Vec<(usize, WorkerPanicInfo)>,
     },
+    /// The storage directory supplied does not match the runtime circuit.
+    IncompatibleStorage,
     Terminated,
 }
 
@@ -50,6 +52,7 @@ impl DetailedError for Error {
         match self {
             Self::WorkerPanic { .. } => Cow::from("WorkerPanic"),
             Self::Terminated => Cow::from("Terminated"),
+            Self::IncompatibleStorage => Cow::from("IncompatibleStorage"),
         }
     }
 }
@@ -67,6 +70,9 @@ impl Display for Error {
                 Ok(())
             }
             Self::Terminated => f.write_str("circuit terminated by the user"),
+            Self::IncompatibleStorage => {
+                f.write_str("Supplied storage directory does not fit the runtime circuit")
+            }
         }
     }
 }

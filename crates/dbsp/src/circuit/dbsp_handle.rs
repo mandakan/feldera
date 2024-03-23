@@ -513,8 +513,7 @@ impl DBSPHandle {
     ) -> Self {
         let storage_path = runtime.runtime().storage_path();
         let checkpointer = Checkpointer::new(storage_path.clone());
-
-        let dbsp_handle = Self {
+        let mut dbsp_handle = Self {
             start_time: Instant::now(),
             runtime: Some(runtime),
             command_senders,
@@ -523,6 +522,9 @@ impl DBSPHandle {
             checkpointer,
             fingerprint: None,
         };
+        dbsp_handle
+            .verify_storage_compatibility()
+            .expect("Storage directory should match with fingerprint of current circuit");
         dbsp_handle
     }
 
@@ -633,6 +635,15 @@ impl DBSPHandle {
             self.fingerprint = Some(fp);
             Ok(fp)
         }
+    }
+
+    fn verify_storage_compatibility(&mut self) -> Result<(), DBSPError> {
+        for cpm in self.checkpointer.list_checkpoints()? {
+            if cpm.fingerprint != self.fingerprint()? {
+                return Err(DBSPError::Runtime(RuntimeError::IncompatibleStorage));
+            }
+        }
+        Ok(())
     }
 
     /// Create a new checkpoint by taking consistent snapshot of the state in
@@ -960,6 +971,23 @@ mod tests {
         .unwrap()
     }
 
+    fn mkcircuit_different(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
+        Runtime::init_circuit(cconf, move |circuit| {
+            let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
+            let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
+            let sample_handle = stream
+                .integrate_trace()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            let _sample_handle2 = stream
+                .integrate_trace()
+                .stream_sample_unique_key_vals(&sample_size_stream)
+                .output();
+            Ok((handle, sample_handle, sample_size_handle))
+        })
+        .unwrap()
+    }
+
     fn mkconfig() -> (TempDir, CircuitConfig) {
         let temp = tempdir().expect("Can't create temp dir for storage");
         let cconf = CircuitConfig {
@@ -1230,24 +1258,9 @@ mod tests {
         generic_checkpoint_restore(batches, mkcircuit_with_bounds);
     }
 
+    /// Make sure two circuits end up with a different fingerprint.
     #[test]
     fn fingerprint_is_different() {
-        fn mkcircuit_different(cconf: &CircuitConfig) -> (DBSPHandle, CircuitHandle) {
-            Runtime::init_circuit(cconf, move |circuit| {
-                let (stream, handle) = circuit.add_input_indexed_zset::<i32, i32, i32>();
-                let (sample_size_stream, sample_size_handle) = circuit.add_input_stream::<usize>();
-                let sample_handle = stream
-                    .integrate_trace()
-                    .stream_sample_unique_key_vals(&sample_size_stream)
-                    .output();
-                let _sample_handle2 = stream
-                    .integrate_trace()
-                    .stream_sample_unique_key_vals(&sample_size_stream)
-                    .output();
-                Ok((handle, sample_handle, sample_size_handle))
-            })
-            .unwrap()
-        }
         let (_temp, cconf) = mkconfig();
         let (mut dbsp, (_input_handle, _, _sample_size_handle)) = mkcircuit(&cconf);
         let fid1 = dbsp.fingerprint().unwrap();
@@ -1263,5 +1276,22 @@ mod tests {
         let (mut dbsp, (_input_handle, _, _sample_size_handle)) = mkcircuit_with_bounds(&cconf);
         let fid3 = dbsp.fingerprint().unwrap();
         assert_eq!(fid1, fid3); // Ideally, should be assert_ne
+    }
+
+    /// Make sure if we create a new circuit with a different fingerprint in the
+    /// same storage directory we don't allow it to start.
+    #[test]
+    #[should_panic]
+    fn reject_different_fingerprint() {
+        let (_temp, mut cconf) = mkconfig();
+        let (mut dbsp, (input_handle, _, _)) = mkcircuit(&cconf);
+        let mut batch: Vec<(i32, Tup2<i32, i32>)> = vec![(1, Tup2(2, 1))];
+        input_handle.append(&mut batch);
+        let cpi = dbsp.commit().expect("commit shouldn't fail");
+        drop(dbsp);
+
+        cconf.init_checkpoint = cpi.uuid;
+        let (dbsp_different, (_input_handle, _, _sample_size_handle)) = mkcircuit_different(&cconf);
+        drop(dbsp_different);
     }
 }
