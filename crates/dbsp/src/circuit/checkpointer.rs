@@ -70,19 +70,22 @@ impl Checkpointer {
             storage_path,
             checkpoint_list,
         };
-        //cp.gc_startup().unwrap_or_else(|_| {
-        //    panic!(
-        //        "Failed to clean up old checkpoint files in '{}'",
-        //        cp.storage_path.display()
-        //    )
-        //});
+        cp.gc_startup().unwrap_or_else(|_| {
+            panic!(
+                "Failed to clean up old checkpoint files in '{}'",
+                cp.storage_path.display()
+            )
+        });
 
         cp
     }
 
-    pub(super) fn gc_startup(&self) -> Result<(), Error> {
+    /// Remove unexpected/leftover files from a previous run in the storage
+    /// directory.
+    fn gc_startup(&self) -> Result<(), Error> {
         // Collect all directories and files still referenced by a checkpoint
         let mut in_use_paths: HashSet<PathBuf> = HashSet::new();
+        in_use_paths.insert(self.storage_path.join(Checkpointer::CHECKPOINT_FILE_NAME));
         for cpm in self.checkpoint_list.iter() {
             in_use_paths.insert(self.storage_path.join(cpm.uuid.to_string()));
             let batches = self
@@ -213,7 +216,6 @@ impl Checkpointer {
         let checkpoint_file =
             self.storage_path
                 .join(format!("{}{}", Self::CHECKPOINT_FILE_NAME, ".mut"));
-        eprintln!("checkpoint_file: {:?}", checkpoint_file);
 
         // write checkpoint list to a file:
         let as_bytes = feldera_storage::file::to_bytes(&self.checkpoint_list)

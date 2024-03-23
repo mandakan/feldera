@@ -868,7 +868,7 @@ where
         let committed: CommittedSpine<B> = self.into();
         let as_bytes =
             feldera_storage::file::to_bytes(&committed).expect("failed to serialize spine data");
-        std::fs::write(&cspine_path, as_bytes).expect("failed to write spine data");
+        fs::write(&cspine_path, as_bytes).expect("failed to write spine data");
         eprintln!("Committed spine to {}", cspine_path.display());
 
         // Write the batches as a separate file, this allows to parse this again e.g.,
