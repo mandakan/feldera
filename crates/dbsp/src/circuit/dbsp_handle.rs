@@ -610,10 +610,6 @@ impl DBSPHandle {
     /// Used by the checkpointer to initiate a commit on the circuit.
     pub(super) fn send_commit(&mut self, uuid: Uuid) -> Result<u64, DBSPError> {
         self.broadcast_command(Command::Commit(uuid), |_, _| {})?;
-        // TODO: I think broadcast_command is synchronous, we can just return
-        // `self.step_id` directly.
-        // TODO: we need to handle the case where the commit fails in one of the
-        // worker threads. The `handler` seemed awkward to use so I ignored it for now.
         Ok(self.step_id)
     }
 
@@ -1125,7 +1121,7 @@ mod tests {
         let _ = File::create(&incomplete_batch_path).expect("can't create file");
 
         let incomplete_checkpoint_dir = temp.path().join(Uuid::now_v7().to_string());
-        let _ = fs::create_dir(&incomplete_checkpoint_dir).expect("can't create checkpoint dir");
+        fs::create_dir(&incomplete_checkpoint_dir).expect("can't create checkpoint dir");
 
         let complete_batch_unused = temp.path().join("complete_batch.feldera");
         let _ = File::create(&complete_batch_unused).expect("can't create file");
