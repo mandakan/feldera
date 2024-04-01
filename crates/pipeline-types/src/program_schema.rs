@@ -3,6 +3,7 @@ use utoipa::ToSchema;
 
 #[cfg(feature = "testing")]
 use proptest::{collection::vec, prelude::any};
+use serde_arrow::_impl::arrow::datatypes::TimeUnit;
 
 /// Returns canonical form of a SQL identifier:
 /// - If id is _not_ quoted, then it is interpreted as a case-insensitive
@@ -83,6 +84,42 @@ pub struct Field {
     pub columntype: ColumnType,
 }
 
+/// The specified units for SQL Interval types.
+///
+/// `INTERVAL 1 DAY`, `INTERVAL 1 DAY TO HOUR`, `INTERVAL 1 DAY TO MINUTE`,
+/// would yield `Day`, `DayToHour`, `DayToMinute`, as the `IntervalUnit` respectively.
+#[derive(Serialize, Deserialize, ToSchema, Debug, Eq, PartialEq, Clone)]
+#[cfg_attr(feature = "testing", derive(proptest_derive::Arbitrary))]
+#[serde(rename_all = "UPPERCASE")]
+pub enum IntervalUnit {
+    /// Unit for `INTERVAL ... DAY`.
+    Day,
+    /// Unit for `INTERVAL ... DAY TO HOUR`.
+    DayToHour,
+    /// Unit for `INTERVAL ... DAY TO MINUTE`.
+    DayToMinute,
+    /// Unit for `INTERVAL ... DAY TO SECOND`.
+    DayToSecond,
+    /// Unit for `INTERVAL ... HOUR`.
+    Hour,
+    /// Unit for `INTERVAL ... HOUR TO MINUTE`.
+    HourToMinute,
+    /// Unit for `INTERVAL ... HOUR TO SECOND`.
+    HourToSecond,
+    /// Unit for `INTERVAL ... MINUTE`.
+    Minute,
+    /// Unit for `INTERVAL ... MINUTE TO SECOND`.
+    MinuteToSecond,
+    /// Unit for `INTERVAL ... MONTH`.
+    Month,
+    /// Unit for `INTERVAL ... SECOND`.
+    Second,
+    /// Unit for `INTERVAL ... YEAR`.
+    Year,
+    /// Unit for `INTERVAL ... YEAR TO MONTH`.
+    YearToMonth,
+}
+
 /// The available SQL types as specified in `CREATE` statements.
 #[derive(Serialize, Deserialize, ToSchema, Debug, Eq, PartialEq, Clone)]
 #[cfg_attr(feature = "testing", derive(proptest_derive::Arbitrary))]
@@ -132,9 +169,8 @@ pub enum SqlType {
     /// SQL `TIMESTAMP` type.
     #[serde(rename = "TIMESTAMP")]
     Timestamp,
-    /// SQL `INTERVAL` type.
-    #[serde(rename = "INTERVAL")]
-    Interval,
+    /// SQL `INTERVAL ... X` type.
+    Interval(IntervalUnit),
     /// SQL `ARRAY` type.
     #[serde(rename = "ARRAY")]
     Array,
@@ -164,7 +200,7 @@ impl From<SqlType> for &'static str {
             SqlType::Time => "TIME",
             SqlType::Date => "DATE",
             SqlType::Timestamp => "TIMESTAMP",
-            SqlType::Interval => "INTERVAL",
+            SqlType::Interval() => "INTERVAL",
             SqlType::Array => "ARRAY",
             SqlType::Struct => "STRUCT",
             SqlType::Null => "NULL",
