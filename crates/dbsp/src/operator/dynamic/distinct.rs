@@ -1,5 +1,8 @@
 //! Distinct operator.
 
+use crate::storage::file::to_bytes;
+use crate::storage::{checkpoint_path, write_commit_metadata};
+use crate::trace::Serializer;
 use crate::{
     algebra::{
         AddByRef, HasOne, HasZero, IndexedZSet, IndexedZSetReader, Lattice, OrdIndexedZSet,
@@ -13,16 +16,20 @@ use crate::{
     circuit_cache_key,
     dynamic::{DynPair, DynWeightedPairs, Erase},
     trace::{Batch, BatchFactories, BatchReader, BatchReaderFactories, Builder, Cursor, Spillable},
-    DBData, Timestamp, ZWeight,
+    DBData, Error, Timestamp, ZWeight,
 };
+use rkyv::{Deserialize, Serialize};
 use size_of::SizeOf;
 use std::{
     borrow::Cow,
     cmp::{min, Ordering},
     collections::BTreeMap,
+    fs,
     marker::PhantomData,
     ops::Neg,
+    path::PathBuf,
 };
+use uuid::Uuid;
 
 circuit_cache_key!(DistinctId<C, D>(GlobalNodeId => Stream<C, D>));
 circuit_cache_key!(DistinctIncrementalId<C, D>(GlobalNodeId => Stream<C, D>));
@@ -345,6 +352,32 @@ where
 /// into a batch.
 type KeysOfInterest<TS, K, V, R> = BTreeMap<TS, Box<DynWeightedPairs<DynPair<K, V>, R>>>;
 
+#[derive(rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+struct CommittedDistinctIncremental {
+    keys_of_interest: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl<Z: IndexedZSet, T: ZTrace<Key = Z::Key, Val = Z::Val>, Clk>
+    From<&DistinctIncremental<Z, T, Clk>> for CommittedDistinctIncremental
+{
+    fn from(value: &DistinctIncremental<Z, T, Clk>) -> Self {
+        let mut keys_of_interest = Vec::with_capacity(value.keys_of_interest.len());
+
+        for (key, value) in value.keys_of_interest.iter() {
+            let mut skey = Serializer::default();
+            let mut sval = Serializer::default();
+            key.serialize(&mut skey).unwrap();
+            value.serialize(&mut sval).unwrap();
+            keys_of_interest.push((
+                skey.into_serializer().into_inner().to_vec(),
+                sval.into_serializer().into_inner().to_vec(),
+            ));
+        }
+
+        CommittedDistinctIncremental { keys_of_interest }
+    }
+}
+
 #[derive(SizeOf)]
 struct DistinctIncremental<Z, T, Clk>
 where
@@ -586,6 +619,21 @@ where
                 + Self::partial_derivative(&vals[0..vals.len() >> 1]).neg()
         }
     }
+
+    /// Return the absolute path of the file for a checkpointed DistinctIncremental operator.
+    ///
+    /// # Arguments
+    /// - `cid`: The checkpoint id.
+    /// - `persistent_id`: The persistent id that identifies the spine within
+    ///   the circuit for a given checkpoint.
+    fn checkpoint_file<P: AsRef<str>>(cid: Uuid, persistent_id: P) -> PathBuf {
+        let mut path = checkpoint_path(cid);
+        path.push(format!(
+            "distinct-incremental-{}.dat",
+            persistent_id.as_ref()
+        ));
+        path
+    }
 }
 
 impl<Z, T, Clk> Operator for DistinctIncremental<Z, T, Clk>
@@ -638,6 +686,41 @@ where
                 .keys_of_interest
                 .keys()
                 .all(|ts| !ts.less_equal(&epoch_end))
+    }
+
+    fn commit<P: AsRef<str>>(&self, cid: Uuid, persistent_id: P) -> Result<(), Error> {
+        let committed: CommittedDistinctIncremental = self.into();
+        let as_bytes = to_bytes(&committed).expect("Serializing CommittedSpine should work.");
+        write_commit_metadata(
+            Self::checkpoint_file(cid, &persistent_id),
+            as_bytes.as_slice(),
+        )?;
+        Ok(())
+    }
+
+    fn restore<P: AsRef<str>>(&mut self, cid: Uuid, persistent_id: P) -> Result<(), Error> {
+        let window_path = Self::checkpoint_file(cid, persistent_id);
+        let content = fs::read(window_path)?;
+        let archived = unsafe { rkyv::archived_root::<CommittedDistinctIncremental>(&content) };
+        let committed: CommittedDistinctIncremental =
+            archived.deserialize(&mut rkyv::Infallible).unwrap();
+
+        let mut btree_keys = KeysOfInterest::new();
+        let val_factory = self.input_factories.weighted_items_factory();
+
+        for (ser_key, ser_val) in committed.keys_of_interest {
+            // Serialize the window bounds back into the key.
+            let mut boxed_key = self.input_factories.key_factory().default_box();
+            let mut boxed_val = val_factory.default_box();
+            unsafe { boxed_key.deserialize_from_bytes(&ser_key, 0) };
+            unsafe { boxed_val.deserialize_from_bytes(&ser_val, 0) };
+
+            btree_keys.insert(boxed_key, boxed_val);
+        }
+
+        self.keys_of_interest = btree_keys;
+
+        Ok(())
     }
 }
 
