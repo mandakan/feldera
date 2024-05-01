@@ -17,6 +17,7 @@ use binrw::{
     io::{self},
     BinRead, Error as BinError,
 };
+use metrics::counter;
 use thiserror::Error as ThisError;
 
 use crate::storage::{
@@ -1183,6 +1184,7 @@ where
     where
         S: Storage,
     {
+        counter!("storage.file.reader.empty").increment(1);
         let file_handle = cache.create()?;
         let (file_handle, path) = cache.complete(file_handle)?;
         Ok(Self(Rc::new(ReaderInner {

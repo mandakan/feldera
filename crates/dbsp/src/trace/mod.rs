@@ -372,6 +372,7 @@ where
 pub trait Spillable: BatchReader<Time = ()> {
     type Spilled: Batch<Key = Self::Key, Val = Self::Val, R = Self::R, Time = ()> + Stored;
 
+    #[inline(never)]
     fn spill(&self, output_factories: &<Self::Spilled as BatchReader>::Factories) -> Self::Spilled {
         copy_batch(self, &(), output_factories)
     }
@@ -397,6 +398,7 @@ where
 pub trait Stored: BatchReader<Time = ()> {
     type Unspilled: Batch<Key = Self::Key, Val = Self::Val, R = Self::R, Time = ()> + Spillable;
 
+    #[inline(never)]
     fn unspill(
         &self,
         output_factories: &<Self::Unspilled as BatchReader>::Factories,
@@ -685,6 +687,7 @@ where
 /// merging.  The main complication is that we will need to extend the trace
 /// implementation to work with batches of multiple types.  This shouldn't be
 /// too hard and is on the todo list.
+#[inline(never)]
 pub fn copy_batch<BI, TS, BO>(batch: &BI, timestamp: &TS, factories: &BO::Factories) -> BO
 where
     TS: Timestamp,

@@ -182,6 +182,10 @@ impl Storage for PosixBackend {
             },
         );
         counter!(FILES_CREATED).increment(1);
+        log::error!(
+            "create_named backtrace: {}",
+            std::backtrace::Backtrace::force_capture()
+        );
 
         Ok(FileHandle(file_counter))
     }

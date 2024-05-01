@@ -3376,6 +3376,7 @@ where
     }
 
     unsafe fn eval(&mut self) -> Result<(), SchedulerError> {
+        log::error!("type of operator: {:?}", std::any::type_name::<Op>());
         self.output_stream.put(match self.input_stream.take() {
             Cow::Owned(v) => self.operator.eval_owned(v),
             Cow::Borrowed(v) => self.operator.eval(v),

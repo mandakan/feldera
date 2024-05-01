@@ -97,6 +97,7 @@ use crate::{
 use crate::dynamic::{ClonableTrait, DeserializableDyn};
 use crate::storage::file::to_bytes;
 use crate::storage::{checkpoint_path, write_commit_metadata};
+use metrics::counter;
 use rand::Rng;
 use rkyv::{ser::Serializer, Archive, Archived, Deserialize, Fallible, Serialize};
 use size_of::SizeOf;
@@ -752,6 +753,8 @@ where
                 activator.activate();
             }
         }*/
+
+        counter!("spine.batch_inserted").increment(1);
     }
 
     fn clear_dirty_flag(&mut self) {
@@ -1290,6 +1293,7 @@ where
     /// option exists purely for bookkeeping purposes, and no computation
     /// is performed to merge the two batches.
     fn begin_merge(batch1: Option<B>, batch2: Option<B>) -> MergeState<B> {
+        counter!("spine.merge_started").increment(1);
         let variant = match (batch1, batch2) {
             (Some(batch1), Some(batch2)) => {
                 // Leonid: we do not require batch bounds to grow monotonically.

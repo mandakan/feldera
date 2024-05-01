@@ -766,6 +766,7 @@ where
         unimplemented!()
     }
 
+    #[inline(never)]
     fn eval_owned_and_ref(&mut self, mut trace: T, batch: &B) -> T {
         // TODO: extend `trace` type to feed untimed batches directly
         // (adding fixed timestamp on the fly).
@@ -782,7 +783,7 @@ where
         // constructed circuit.
         unimplemented!()
     }
-
+    #[inline(never)]
     fn eval_owned(&mut self, mut trace: T, batch: B) -> T {
         trace.insert(copy_batch(
             &batch,

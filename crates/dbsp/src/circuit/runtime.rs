@@ -16,6 +16,7 @@ use crossbeam::channel::bounded;
 use crossbeam_utils::sync::{Parker, Unparker};
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::net::SocketAddr;
 use std::{
     backtrace::Backtrace,
     borrow::Cow,
@@ -255,6 +256,16 @@ impl RuntimeInner {
         start_checkpoint: Uuid,
         min_storage_rows: usize,
     ) -> Result<Self, DBSPError> {
+        #[cfg(feature = "metrics-exporter-tcp")]
+        {
+            use std::net::SocketAddr;
+            let builder = metrics_exporter_tcp::TcpBuilder::new();
+            builder
+                .listen_address(SocketAddr::from(([127, 0, 0, 1], 4999)))
+                .install()
+                .expect("failed to install TCP exporter");
+        }
+
         let local_workers = layout.local_workers().len();
         let mut panic_info = Vec::with_capacity(local_workers);
         for _ in 0..local_workers {
