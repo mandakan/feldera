@@ -522,6 +522,27 @@ benchmark:
     SAVE ARTIFACT crates/dbsp/galen_results.csv AS LOCAL .
     #SAVE ARTIFACT crates/dbsp/ldbc_results.csv AS LOCAL .
 
+pipeline-manager-benchmark:
+    FROM +build-pipeline-manager-container
+    ENTRYPOINT ["./pipeline-manager", "--bind-address=0.0.0.0", "--sql-compiler-home=/home/feldera/database-stream-processor/sql-to-dbsp-compiler", "--dbsp-override-path=/home/feldera/database-stream-processor", "--dev-mode", "--compilation-profile=optimized"]
+
+benchmark-nexmark-sql:
+    COPY benchmark/run-nexmark.sh benchmark/
+    COPY benchmark/feldera-sql benchmark/
+    COPY deploy/docker-compose.yml .
+
+    TRY
+        WITH DOCKER --load ghcr.io/feldera/pipeline-manager:latest=+pipeline-manager-benchmark \
+                    --compose docker-compose.yml \
+                    --service pipeline-manager
+            RUN ./run-nexmark.sh --events=10M --language=sql --runner=feldera
+        END
+    FINALLY
+        #SAVE ARTIFACT --if-exists /dbsp/playwright-report.zip AS LOCAL .
+    END
+
+
+
 all-tests:
     BUILD +formatting-check
     BUILD +machete
