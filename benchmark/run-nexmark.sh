@@ -462,7 +462,8 @@ case $runner:$language in
 	fi
 	rm -f results.csv
 	CARGO=$(find_program cargo)
-	run_log feldera-sql/run.py \
+	echo "here"
+	run_log python3 feldera-sql/run.py \
 	    --api-url="$api_url" \
 	    --kafka-broker="$kafka_broker" \
 	    --cores $cores \

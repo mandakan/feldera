@@ -1,4 +1,3 @@
-name: feldera
 services:
   pipeline-manager:
     tty: true

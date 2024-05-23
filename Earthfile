@@ -1,6 +1,6 @@
 VERSION --try 0.8
 IMPORT github.com/earthly/lib/rust:1a4a008e271c7a5583e7bd405da8fd3624c05610 AS rust
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install --yes sudo
 
@@ -14,11 +14,24 @@ ENV RUST_BUILD_MODE='' # set to --release for release builds
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 install-deps:
+    RUN sudo apt-get install --yes ca-certificates curl
+    RUN sudo install -m 0755 -d /etc/apt/keyrings
+    RUN sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    RUN sudo chmod a+r /etc/apt/keyrings/docker.asc
+    # Add the repository to Apt sources:
+    RUN echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     RUN apt-get update
+
     RUN apt-get install --yes build-essential curl libssl-dev build-essential pkg-config \
                               cmake git gcc clang libclang-dev python3-pip python3-plumbum \
-                              hub numactl openjdk-19-jre-headless maven netcat jq \
-                              docker.io libenchant-2-2 graphviz locales protobuf-compiler
+                              hub numactl openjdk-21-jre-headless maven netcat-traditional jq \
+                              docker.io libenchant-2-2 graphviz locales protobuf-compiler \
+                              python3.12-dev docker-compose-plugin unzip
+    RUN apt install -y python3-wheel python3-notebook python3-nbclient python3-geopy python3-pandas python3-sklearn python3-sklearn-lib python3-xgboost python3-requests
+    RUN pip3 install --break-system-packages --user gdown
     # Set UTF-8 locale. Needed for the Rust compiler to handle Unicode column names.
     RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
         locale-gen
@@ -61,7 +74,7 @@ install-rust:
     ARG EARTHLY_TARGET_PROJECT_NO_TAG
     ARG EARTHLY_GIT_BRANCH
     ARG OS_RELEASE=$(md5sum /etc/os-release | cut -d ' ' -f 1)
-    DO rust+INIT --cache_prefix="${EARTHLY_TARGET_PROJECT_NO_TAG}#${EARTHLY_GIT_BRANCH}#${OS_RELEASE}#earthly-cargo-cache" --keep_fingerprints=true
+    DO rust+INIT --keep_fingerprints=true
 
 rust-sources:
     FROM +install-rust
@@ -86,21 +99,6 @@ clippy:
     DO rust+CARGO --args="clippy -- -D warnings"
     ENV RUSTDOCFLAGS="-D warnings"
     DO rust+CARGO --args="doc --no-deps"
-
-install-python-deps:
-    FROM +install-deps
-    RUN pip install wheel
-    COPY demo/demo_notebooks/requirements.txt requirements.txt
-    RUN pip wheel -r requirements.txt --wheel-dir=wheels
-    SAVE ARTIFACT wheels /wheels
-
-install-python:
-    FROM +install-deps
-    COPY +install-python-deps/wheels wheels
-    COPY demo/demo_notebooks/requirements.txt requirements.txt
-    RUN pip install --user -v --no-index --find-links=wheels -r requirements.txt
-    SAVE ARTIFACT /root/.local/lib/python3.10
-    SAVE ARTIFACT /root/.local/bin
 
 build-webui-deps:
     FROM +install-deps
@@ -235,13 +233,8 @@ openapi-checker:
         diff -bur openapi.json ../openapi.json-base
 
 test-python:
-    FROM +build-manager
+    FROM +install-rust
     COPY +build-manager/pipeline-manager .
-    RUN mkdir -p /root/.local/lib/python3.10
-    RUN mkdir -p /root/.local/bin
-
-    COPY +install-python/python3.10 /root/.local/lib/python3.10
-    COPY +install-python/bin /root/.local/bin
 
     COPY +build-manager/pipeline-manager .
     COPY +build-sql/sql-to-dbsp-compiler sql-to-dbsp-compiler
@@ -330,8 +323,6 @@ build-demo-container:
     RUN curl -O https://sfc-repo.snowflakecomputing.com/snowsql/bootstrap/1.2/linux_x86_64/snowsql-1.2.28-linux_x86_64.bash \
         && SNOWSQL_DEST=/bin SNOWSQL_LOGIN_SHELL=~/.profile bash snowsql-1.2.28-linux_x86_64.bash \
         && snowsql -v
-    COPY +install-python/python3.10 /root/.local/lib/python3.10
-    COPY +install-python/bin /root/.local/bin
     # Needed by the JDBC demo.
     RUN pip3 install "psycopg[binary]"
     # Needed by the simple-count demo.
@@ -527,18 +518,23 @@ pipeline-manager-benchmark:
     ENTRYPOINT ["./pipeline-manager", "--bind-address=0.0.0.0", "--sql-compiler-home=/home/feldera/database-stream-processor/sql-to-dbsp-compiler", "--dbsp-override-path=/home/feldera/database-stream-processor", "--dev-mode", "--compilation-profile=optimized"]
 
 benchmark-nexmark-sql:
-    COPY benchmark/run-nexmark.sh benchmark/
-    COPY benchmark/feldera-sql benchmark/
+    FROM +build-nexmark
+    RUN curl -LO https://github.com/redpanda-data/redpanda/releases/download/v24.1.2/rpk-linux-amd64.zip
+    RUN unzip rpk-linux-amd64.zip -d /bin/
     COPY deploy/docker-compose.yml .
-
+    COPY benchmark benchmark
+    RUN ls benchmark
+    ENV FELDERA_VERSION=latest
     TRY
         WITH DOCKER --load ghcr.io/feldera/pipeline-manager:latest=+pipeline-manager-benchmark \
+                    --pull docker.redpanda.com/vectorized/redpanda:v23.2.3 \
                     --compose docker-compose.yml \
-                    --service pipeline-manager
-            RUN ./run-nexmark.sh --events=10M --language=sql --runner=feldera
+                    --service pipeline-manager \
+                    --service redpanda
+            RUN cd benchmark && ./run-nexmark.sh --events=1M --language=sql --runner=feldera --kafka-broker=localhost:19092 --query=0
         END
     FINALLY
-        #SAVE ARTIFACT --if-exists /dbsp/playwright-report.zip AS LOCAL .
+        SAVE ARTIFACT --if-exists benchmark/results.csv AS LOCAL sql_nexmark_results.csv
     END
 
 
