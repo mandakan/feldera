@@ -37,7 +37,7 @@ env.java.opts.taskmanager: -Xloggc:/opt/flink/log/taskmanager-gc.log
 # State & Checkpoint
 #==============================================================================
 
-state.backend: rocksdb
+state.backend: hashmap
 # for example, hdfs://benchmark01/checkpoint
 state.checkpoints.dir: file:///tmp/checkpoints
 state.backend.rocksdb.localdir: /tmp/rocksdb
