@@ -16,6 +16,7 @@ use casts::cast_to_decimal_decimal;
 pub use geopoint::GeoPoint;
 pub use interval::{LongInterval, ShortInterval};
 pub use source::{SourcePosition, SourcePositionRange};
+pub use string::SqlString;
 pub use timestamp::{Date, Time, Timestamp};
 pub use variant::Variant;
 
@@ -614,7 +615,7 @@ macro_rules! for_all_compare {
     ($func_name: ident, $ret_type: ty) => {
         for_all_numeric_compare!($func_name, bool);
         some_operator!($func_name, b, bool, bool);
-        some_operator!($func_name, s, String, bool);
+        some_operator!($func_name, s, SqlString, bool);
         some_operator!($func_name, V, Variant, bool);
     };
 }
@@ -1514,22 +1515,23 @@ some_polymorphic_function1!(is_nan, f, F32, bool);
 
 ////////////////////////////////////////////////
 
-pub fn dump<T>(prefix: String, data: &T) -> T
+// Functions called by 'writelog'
+pub fn dump<T>(prefix: SqlString, data: &T) -> T
 where
     T: Debug + Clone,
 {
-    println!("{}: {:?}", prefix, data);
+    println!("{}: {:?}", prefix.str(), data);
     data.clone()
 }
 
-pub fn print(str: String) {
-    print!("{}", str)
+pub fn print(str: SqlString) {
+    print!("{}", str.str())
 }
 
-pub fn print_opt(str: Option<String>) {
+pub fn print_opt(str: Option<SqlString>) {
     match str {
         None => print!("NULL"),
-        Some(x) => print!("{}", x),
+        Some(x) => print!("{}", x.str()),
     }
 }
 
