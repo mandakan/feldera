@@ -382,6 +382,7 @@ public class DBSPCompiler implements IWritesLogs, ICompilerComponent, IErrorRepo
         String keyString = key.getString();
         //noinspection SwitchStatementWithTooFewBranches
         switch (keyString) {
+            case "rust":
             case "connectors":
                 this.validateConnectorsProperty(node, key, value);
                 break;
