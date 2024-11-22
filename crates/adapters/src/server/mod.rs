@@ -247,6 +247,7 @@ where
     .shutdown_timeout(10)
     .listen(listener)
     .map_err(|e| ControllerError::io_error("binding server to the listener".to_string(), e))?
+    .workers(2)
     .run();
 
     rt::System::new().block_on(async {
