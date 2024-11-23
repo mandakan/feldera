@@ -7,6 +7,7 @@ use crate::{InputBuffer, Parser};
 use anyhow::{bail, Error as AnyError, Result as AnyResult};
 use feldera_types::program_schema::Relation;
 use feldera_types::transport::file::{FileInputConfig, FileOutputConfig};
+use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::hash::Hasher;
@@ -161,7 +162,8 @@ impl FileInputReader {
                         while remainder > 0 {
                             let n = splitter.read(&mut file, buffer_size, remainder)?;
                             if n == 0 {
-                                todo!();
+                                error!("inconsistency replaying file data");
+                                break;
                             }
                             remainder -= n;
                             while let Some(chunk) = splitter.next(remainder == 0) {
