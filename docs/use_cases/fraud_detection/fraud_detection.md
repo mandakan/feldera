@@ -46,8 +46,8 @@ in two public S3 buckets:
     * Transaction table: `s3://feldera-fraud-detection-data/transaction_train/`
 
 * Inference dataset:
-    * Demographics table: `s3://feldera-fraud-detection-data/demographics_train/`
-    * Transaction table: `s3://feldera-fraud-detection-data/transaction_train/`
+    * Demographics table: `s3://feldera-fraud-detection-data/demographics_infer/`
+    * Transaction table: `s3://feldera-fraud-detection-data/transaction_infer/`
 
 ## Model training and testing
 
